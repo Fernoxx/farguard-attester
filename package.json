@@ -1,0 +1,25 @@
+{
+  "name": "farguard-attester",
+  "version": "1.0.0",
+  "description": "FarGuard attester backend — Neynar verification + EIP-712 attestation issuer (+ optional relayer)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development nodemon server.js"
+  },
+  "dependencies": {
+    "@neynar/nodejs-sdk": "^1.0.0",
+    "axios": "^1.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.8.0",
+    "express": "^4.18.2",
+    "express-rate-limit": "^6.8.0",
+    "helmet": "^7.0.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
