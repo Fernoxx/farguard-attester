@@ -7,7 +7,10 @@ import { ethers } from "ethers";
 import pkg from "@neynar/nodejs-sdk";
 const { NeynarAPIClient } = pkg;
 
-const neynarClient = new NeynarAPIClient({ apiKey: NEYNAR_API_KEY });
+// ✅ Only one declaration
+const neynarClient = new NeynarAPIClient({
+  apiKey: process.env.NEYNAR_API_KEY,
+});
 
 dotenv.config();
 
