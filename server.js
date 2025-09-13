@@ -4,10 +4,10 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
-import pkg from "@neynar/nodejs-sdk";   // ✅ FIX: CommonJS import
-import axios from "axios";
+import pkg from "@neynar/nodejs-sdk";
+const { NeynarAPIClient } = pkg;
 
-const { NeynarAPIClient, Configuration } = pkg;
+const neynarClient = new NeynarAPIClient({ apiKey: NEYNAR_API_KEY });
 
 dotenv.config();
 
