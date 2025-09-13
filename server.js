@@ -4,7 +4,8 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
-import { NeynarAPIClient, Configuration } from "@neynar/nodejs-sdk";
+import pkg from "@neynar/nodejs-sdk";
+const { NeynarAPIClient, Configuration } = pkg;
 import axios from "axios";
 
 dotenv.config();
