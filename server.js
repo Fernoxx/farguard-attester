@@ -74,23 +74,42 @@ function buildDomain() {
 }
 
 /**
- * Fetch Farcaster user by wallet using Neynar SDK
+ * Uses Neynar SDK exact endpoint per docs:
+ * fetchBulkUsersByEthOrSolAddress
+ * Some SDK versions expose it directly, some under .v2
  */
 async function fetchFarcasterUserByWallet(walletAddress) {
+  const addresses = [ethers.getAddress(walletAddress)];
+
+  let resp = null;
+
   try {
-    const addresses = [ethers.getAddress(walletAddress)];
-    const resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
-    if (!resp) return null;
-    if (resp.result && resp.result.user) return resp.result.user;
-    if (Array.isArray(resp) && resp.length > 0) {
-      const first = resp[0];
-      if (first && first.result && first.result.user) return first.result.user;
+    if (typeof neynarClient.fetchBulkUsersByEthOrSolAddress === "function") {
+      resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
+    } else if (
+      neynarClient.v2 &&
+      typeof neynarClient.v2.fetchBulkUsersByEthOrSolAddress === "function"
+    ) {
+      resp = await neynarClient.v2.fetchBulkUsersByEthOrSolAddress({ addresses });
+    } else {
+      console.error("Neynar SDK: fetchBulkUsersByEthOrSolAddress not found in client");
+      return null;
     }
-    return null;
   } catch (err) {
-    console.error("fetchFarcasterUserByWallet error:", err?.message || err);
-    throw err;
+    console.error("Neynar fetch error:", err);
+    return null;
   }
+
+  if (!resp) return null;
+
+  // handle shape differences
+  if (resp.result && resp.result.user) return resp.result.user;
+  if (resp.result && Array.isArray(resp.result.users)) {
+    return resp.result.users[0]; // take the first user if array
+  }
+  if (Array.isArray(resp) && resp[0]?.result?.user) return resp[0].result.user;
+
+  return null;
 }
 
 /**
