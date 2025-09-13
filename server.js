@@ -4,9 +4,10 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
-import pkg from "@neynar/nodejs-sdk";
-const { NeynarAPIClient, Configuration } = pkg;
+import pkg from "@neynar/nodejs-sdk";   // ✅ FIX: CommonJS import
 import axios from "axios";
+
+const { NeynarAPIClient, Configuration } = pkg;
 
 dotenv.config();
 
@@ -43,7 +44,7 @@ app.use(
   })
 );
 
-// initialize Neynar SDK (exact call used in their docs)
+// initialize Neynar SDK (✅ FIXED import style)
 const neynarConfig = new Configuration({ apiKey: NEYNAR_API_KEY });
 const neynarClient = new NeynarAPIClient(neynarConfig);
 
@@ -74,25 +75,20 @@ function buildDomain() {
 }
 
 /**
- * Fetch Farcaster user by wallet using Neynar SDK exact method from docs:
- * client.fetchBulkUsersByEthOrSolAddress({ addresses: [addr] })
- * Returns user object (contains fid) or null.
+ * Fetch Farcaster user by wallet using Neynar SDK
  */
 async function fetchFarcasterUserByWallet(walletAddress) {
   try {
     const addresses = [ethers.getAddress(walletAddress)];
     const resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
-    // expected shape per docs: { result: { user: {...} } }
     if (!resp) return null;
     if (resp.result && resp.result.user) return resp.result.user;
-    // fallback if SDK returns variant shapes
     if (Array.isArray(resp) && resp.length > 0) {
       const first = resp[0];
       if (first && first.result && first.result.user) return first.result.user;
     }
     return null;
   } catch (err) {
-    // bubble up network/SDK errors
     console.error("fetchFarcasterUserByWallet error:", err?.message || err);
     throw err;
   }
@@ -100,8 +96,6 @@ async function fetchFarcasterUserByWallet(walletAddress) {
 
 /**
  * Check on-chain RevokeHelper logs via Neynar Snapchain RPC (eth_getLogs)
- * Returns true if a Revoked event exists matching (wallet, token, spender).
- * This is optional but prevents signing attestations when no on-chain record exists.
  */
 async function hasRevokedRecordedOnchain(wallet, token, spender) {
   try {
@@ -149,11 +143,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-/**
- * POST /checkRevoked
- * Body: { wallet, token, spender }
- * Response: { revoked: true/false }
- */
 app.post("/checkRevoked", async (req, res) => {
   try {
     const { wallet, token, spender } = req.body;
@@ -166,11 +155,6 @@ app.post("/checkRevoked", async (req, res) => {
   }
 });
 
-/**
- * POST /attest
- * Body: { wallet, token, spender }
- * Response: { sig, nonce, deadline, fid, issuedBy }
- */
 app.post("/attest", async (req, res) => {
   try {
     const { wallet, token = ethers.ZeroAddress, spender = ethers.ZeroAddress } = req.body;
@@ -183,7 +167,7 @@ app.post("/attest", async (req, res) => {
     }
     const fid = String(user.fid);
 
-    // 2) optional: verify revoke recorded onchain to avoid signing for non-recorded revokes
+    // 2) check revoke recorded
     const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
     if (!revoked) {
       return res.status(400).json({ error: "no revoke recorded onchain; call recordRevoked first" });
@@ -191,7 +175,7 @@ app.post("/attest", async (req, res) => {
 
     // 3) build attestation and sign
     const nonce = BigInt(Date.now()).toString();
-    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes TTL
+    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 min TTL
 
     const domain = buildDomain();
     const value = {
