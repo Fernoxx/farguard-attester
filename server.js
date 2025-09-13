@@ -1,60 +1,45 @@
+// server.js — FarGuard attester (Option B: custody check on Optimism + revoke log on Base)
+// Node: ESM
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
-import pkg from "@neynar/nodejs-sdk";
-const { NeynarAPIClient } = pkg;
-
-// ✅ Only one declaration
-const neynarClient = new NeynarAPIClient({
-  apiKey: process.env.NEYNAR_API_KEY,
-});
 
 dotenv.config();
 
+/* ---------- env ---------- */
 const PORT = process.env.PORT || 3000;
-const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
-const NEYNAR_RPC = process.env.NEYNAR_RPC || "https://snapchain-api.neynar.com";
 const ATTESTER_PK = process.env.ATTESTER_PK;
 const VERIFYING_CONTRACT = process.env.VERIFYING_CONTRACT;
 const REVOKE_HELPER_ADDRESS = process.env.REVOKE_HELPER_ADDRESS;
+const IDREGISTRY_ADDRESS = process.env.IDREGISTRY_ADDRESS;
+const BASE_RPC = process.env.BASE_RPC;
+const OPTIMISM_RPC = process.env.OPTIMISM_RPC;
 const CHAIN_ID = Number(process.env.CHAIN_ID || 8453);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 60);
 
-if (!NEYNAR_API_KEY) {
-  console.error("NEYNAR_API_KEY missing");
-  process.exit(1);
-}
-if (!ATTESTER_PK) {
-  console.error("ATTESTER_PK missing");
-  process.exit(1);
-}
-if (!VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS) {
-  console.error("contract addresses missing in env");
+if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !IDREGISTRY_ADDRESS || !BASE_RPC || !OPTIMISM_RPC) {
+  console.error("Missing required env vars. Check ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, IDREGISTRY_ADDRESS, BASE_RPC, OPTIMISM_RPC");
   process.exit(1);
 }
 
-const app = express();
-app.use(express.json({ limit: "100kb" }));
-app.use(cors());
-app.use(helmet());
+/* ---------- providers & contracts ---------- */
+const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
+const optimismProvider = new ethers.JsonRpcProvider(OPTIMISM_RPC); // chainId not required for read-only
 
-// trust proxy for rate limiting (Railway/Heroku/Vercel issue)
-app.set("trust proxy", 1);
+const attesterWallet = new ethers.Wallet(ATTESTER_PK); // no provider needed for signing only
 
-app.use(
-  rateLimit({
-    windowMs: 60_000,
-    max: 60, // adjust as needed
-    message: { error: "Too many requests, slow down" },
-  })
-);
+// Minimal ABI for IDRegistry: custodyOf(uint256)
+const IDREGISTRY_ABI = [
+  "function custodyOf(uint256 fid) view returns (address)"
+];
+// Minimal interface for checking RevokeHelper event: event Revoked(address indexed wallet, address indexed token, address indexed spender)
+const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
-// attester signer (only for signing attestations)
-const attesterWallet = new ethers.Wallet(ATTESTER_PK);
-
-// EIP-712 config (must match on-chain domain values)
+/* ---------- EIP-712 domain/types ---------- */
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
@@ -67,7 +52,6 @@ const ATTEST_TYPES = {
     { name: "spender", type: "address" },
   ],
 };
-
 function buildDomain() {
   return {
     name: NAME,
@@ -77,154 +61,124 @@ function buildDomain() {
   };
 }
 
+/* ---------- express app ---------- */
+const app = express();
+app.use(express.json({ limit: "200kb" }));
+app.use(cors());
+app.use(helmet());
+// trust proxy for PaaS (Railway)
+app.set("trust proxy", 1);
+app.use(rateLimit({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_MAX, message: { error: "Too many requests" } }));
+
+/* ---------- helpers ---------- */
+
 /**
- * Uses Neynar SDK exact endpoint per docs:
- * fetchBulkUsersByEthOrSolAddress
- * Some SDK versions expose it directly, some under .v2
+ * Check custody on Optimism: returns address or null+throws
  */
-async function fetchFarcasterUserByWallet(walletAddress) {
-  const addresses = [ethers.getAddress(walletAddress)];
-
-  let resp = null;
-
+async function getCustodyAddressForFid(fid) {
+  const idRegistry = new ethers.Contract(IDREGISTRY_ADDRESS, IDREGISTRY_ABI, optimismProvider);
   try {
-    if (typeof neynarClient.fetchBulkUsersByEthOrSolAddress === "function") {
-      resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
-    } else if (
-      neynarClient.v2 &&
-      typeof neynarClient.v2.fetchBulkUsersByEthOrSolAddress === "function"
-    ) {
-      resp = await neynarClient.v2.fetchBulkUsersByEthOrSolAddress({ addresses });
-    } else {
-      console.error("Neynar SDK: fetchBulkUsersByEthOrSolAddress not found in client");
-      return null;
-    }
+    const custody = await idRegistry.custodyOf(ethers.BigInt(fid));
+    return ethers.getAddress(custody);
   } catch (err) {
-    console.error("Neynar fetch error:", err);
-    return null;
+    console.error("idRegistry.custodyOf error:", err?.message || err);
+    throw new Error("idRegistry lookup failed");
   }
-
-  if (!resp) return null;
-
-  // handle shape differences
-  if (resp.result && resp.result.user) return resp.result.user;
-  if (resp.result && Array.isArray(resp.result.users)) {
-    return resp.result.users[0]; // take the first user if array
-  }
-  if (Array.isArray(resp) && resp[0]?.result?.user) return resp[0].result.user;
-
-  return null;
 }
 
 /**
- * Check on-chain RevokeHelper logs via Neynar Snapchain RPC (eth_getLogs)
+ * Check if RevokeHelper emitted Revoked(wallet, token, spender) on Base
+ * Uses getLogs with indexed topics (wallet, token, spender) to find any matching log.
  */
-async function hasRevokedRecordedOnchain(wallet, token, spender) {
+async function hasRevokedOnBase(wallet, token, spender) {
+  // topics: [eventTopic, wallet, token, spender] (indexed)
+  const topics = [
+    REVOKE_EVENT_TOPIC,
+    ethers.hexZeroPad(ethers.getAddress(wallet), 32),
+    ethers.hexZeroPad(ethers.getAddress(token), 32),
+    ethers.hexZeroPad(ethers.getAddress(spender), 32),
+  ];
+
+  const filter = {
+    address: REVOKE_HELPER_ADDRESS,
+    topics,
+    fromBlock: 0,
+    toBlock: "latest",
+  };
+
   try {
-    const eventTopic = ethers.id("Revoked(address,address,address)");
-    const topics = [
-      eventTopic,
-      ethers.hexZeroPad(ethers.getAddress(wallet), 32),
-      token ? ethers.hexZeroPad(ethers.getAddress(token), 32) : null,
-      spender ? ethers.hexZeroPad(ethers.getAddress(spender), 32) : null,
-    ];
-
-    const payload = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_getLogs",
-      params: [
-        {
-          address: REVOKE_HELPER_ADDRESS,
-          topics,
-          fromBlock: "0x0",
-          toBlock: "latest",
-        },
-      ],
-    };
-
-    const res = await axios.post(NEYNAR_RPC, payload, {
-      headers: { "Content-Type": "application/json", "x-api-key": NEYNAR_API_KEY },
-      timeout: 15000,
-    });
-
-    const logs = res?.data?.result;
+    const logs = await baseProvider.getLogs(filter);
     return Array.isArray(logs) && logs.length > 0;
   } catch (err) {
-    console.error("hasRevokedRecordedOnchain error:", err?.message || err);
-    throw err;
+    console.error("getLogs error:", err?.message || err);
+    throw new Error("log lookup failed");
   }
 }
 
-/* ------------------ endpoints ------------------ */
+/* ---------- endpoints ---------- */
 
+/**
+ * Health
+ */
 app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    attester: attesterWallet.address,
-  });
+  return res.json({ ok: true, attester: attesterWallet.address });
 });
 
-app.post("/checkRevoked", async (req, res) => {
-  try {
-    const { wallet, token, spender } = req.body;
-    if (!wallet || !token || !spender) return res.status(400).json({ error: "wallet, token, spender required" });
-    const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
-    return res.json({ revoked });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "internal error", details: err?.message || String(err) });
-  }
-});
-
+/**
+ * /attest
+ * Body: { wallet, fid, token, spender }
+ * Requirements:
+ *  - wallet must equal custodyOf(fid) on Optimism
+ *  - RevokeHelper must have emitted Revoked(wallet, token, spender) on Base
+ * Returns: { sig, nonce, deadline, fid, issuedBy }
+ */
 app.post("/attest", async (req, res) => {
   try {
-    const { wallet, token = ethers.ZeroAddress, spender = ethers.ZeroAddress } = req.body;
-    if (!wallet) return res.status(400).json({ error: "wallet required" });
-
-    // 1) verify Farcaster user via Neynar SDK
-    const user = await fetchFarcasterUserByWallet(wallet);
-    if (!user) {
-      return res.status(403).json({ error: "wallet not a Farcaster user" });
+    const { wallet, fid, token, spender } = req.body;
+    if (!wallet || fid === undefined || !token || !spender) {
+      return res.status(400).json({ error: "wallet, fid, token, spender required" });
     }
-    const fid = String(user.fid);
 
-    // 2) check revoke recorded
-    const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
+    // normalize
+    const walletAddr = ethers.getAddress(wallet);
+    const tokenAddr = ethers.getAddress(token);
+    const spenderAddr = ethers.getAddress(spender);
+
+    // 1) custody check on Optimism
+    const custody = await getCustodyAddressForFid(fid);
+    if (custody.toLowerCase() !== walletAddr.toLowerCase()) {
+      return res.status(403).json({ error: "wallet not custody for fid" });
+    }
+
+    // 2) check revoke recorded on base
+    const revoked = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
     if (!revoked) {
-      return res.status(400).json({ error: "no revoke recorded onchain; call recordRevoked first" });
+      return res.status(400).json({ error: "no revoke recorded on base; call RevokeHelper.recordRevoked first" });
     }
 
-    // 3) build attestation and sign
+    // 3) build EIP-712 attestation
     const nonce = BigInt(Date.now()).toString();
-    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 min TTL
-
+    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes
     const domain = buildDomain();
     const value = {
-      wallet: ethers.getAddress(wallet),
-      fid,
+      wallet: walletAddr,
+      fid: String(fid),
       nonce,
       deadline,
-      token: token ? ethers.getAddress(token) : ethers.ZeroAddress,
-      spender: spender ? ethers.getAddress(spender) : ethers.ZeroAddress,
+      token: tokenAddr,
+      spender: spenderAddr,
     };
 
     const signature = await attesterWallet._signTypedData(domain, ATTEST_TYPES, value);
 
-    return res.json({
-      sig: signature,
-      nonce,
-      deadline,
-      fid,
-      issuedBy: attesterWallet.address,
-    });
+    return res.json({ sig: signature, nonce, deadline, fid: String(fid), issuedBy: attesterWallet.address });
   } catch (err) {
-    console.error("attest error:", err?.message || err);
+    console.error("/attest error:", err?.message || err);
     return res.status(500).json({ error: "internal error", details: err?.message || String(err) });
   }
 });
 
-/* ------------------ start ------------------ */
+/* ---------- start ---------- */
 app.listen(PORT, () => {
   console.log(`Attester running on port ${PORT}. attester=${attesterWallet.address}`);
 });
