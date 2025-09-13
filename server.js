@@ -1,3 +1,15 @@
+/**
+ * server.js
+ * FarGuard Attester (Neynar verification + EIP-712 attestation)
+ *
+ * Endpoints:
+ *  - GET  /health
+ *  - POST /attest  { wallet, token, spender } -> returns { sig, nonce, deadline, fid }
+ *  - POST /checkRevoked { wallet, token, spender } -> returns { revoked: true/false }
+ *
+ * Security: store ATTESTER_PK as Railway secret (or KMS). Rate-limit the API.
+ */
+
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -13,11 +25,9 @@ const PORT = process.env.PORT || 3000;
 const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
 const NEYNAR_RPC = process.env.NEYNAR_RPC || "https://snapchain-api.neynar.com";
 const ATTESTER_PK = process.env.ATTESTER_PK;
-const RELAYER_PK = process.env.RELAYER_PK || null;
 const VERIFYING_CONTRACT = process.env.VERIFYING_CONTRACT;
 const REVOKE_HELPER_ADDRESS = process.env.REVOKE_HELPER_ADDRESS;
 const CHAIN_ID = Number(process.env.CHAIN_ID || 8453);
-const RPC_HTTP = process.env.RPC_HTTP || null;
 
 if (!NEYNAR_API_KEY) {
   console.error("NEYNAR_API_KEY missing");
@@ -39,27 +49,19 @@ app.use(helmet());
 app.use(
   rateLimit({
     windowMs: 60_000,
-    max: 60, // adjust to your needs
+    max: 60, // adjust as needed
     message: { error: "Too many requests, slow down" },
   })
 );
 
-// initialize neynar SDK client (exact call from docs)
-const neynarConfig = new Configuration({
-  apiKey: NEYNAR_API_KEY,
-});
+// initialize Neynar SDK (exact call used in their docs)
+const neynarConfig = new Configuration({ apiKey: NEYNAR_API_KEY });
 const neynarClient = new NeynarAPIClient(neynarConfig);
 
-// ethers signers
+// attester signer (only for signing attestations)
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
-let relayerWallet = null;
-let relayerProvider = null;
-if (RELAYER_PK && RPC_HTTP) {
-  relayerProvider = new ethers.JsonRpcProvider(RPC_HTTP, { name: "base", chainId: CHAIN_ID });
-  relayerWallet = new ethers.Wallet(RELAYER_PK, relayerProvider);
-}
 
-// EIP-712 domain
+// EIP-712 config (must match on-chain domain values)
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
@@ -83,92 +85,116 @@ function buildDomain() {
 }
 
 /**
- * Uses Neynar SDK exact endpoint per docs:
+ * Fetch Farcaster user by wallet using Neynar SDK exact method from docs:
  * client.fetchBulkUsersByEthOrSolAddress({ addresses: [addr] })
- * returns user object under res.result.user if exists.
+ * Returns user object (contains fid) or null.
  */
 async function fetchFarcasterUserByWallet(walletAddress) {
-  const addresses = [ethers.getAddress(walletAddress)];
-  // exact SDK method from Neynar docs:
-  const resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
-  // resp shape: { result: { user: { fid: ..., ... } } } per docs
-  // some SDKs wrap differently; adjust if you see resp.data or resp.result.user
-  if (!resp) return null;
-  // defensive checks:
-  if (resp.result && resp.result.user) return resp.result.user;
-  // sometimes SDK returns an array; try fallback:
-  if (Array.isArray(resp)) {
-    // try first element
-    const first = resp[0];
-    if (first && first.result && first.result.user) return first.result.user;
+  try {
+    const addresses = [ethers.getAddress(walletAddress)];
+    const resp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses });
+    // expected shape per docs: { result: { user: {...} } }
+    if (!resp) return null;
+    if (resp.result && resp.result.user) return resp.result.user;
+    // fallback if SDK returns variant shapes
+    if (Array.isArray(resp) && resp.length > 0) {
+      const first = resp[0];
+      if (first && first.result && first.result.user) return first.result.user;
+    }
+    return null;
+  } catch (err) {
+    // bubble up network/SDK errors
+    console.error("fetchFarcasterUserByWallet error:", err?.message || err);
+    throw err;
   }
-  return null;
 }
 
 /**
- * Optional: check on-chain logs on the RevokeHelper contract using Neynar RPC (eth_getLogs).
- * This avoids signing attestations when there's no on-chain record.
+ * Check on-chain RevokeHelper logs via Neynar Snapchain RPC (eth_getLogs)
+ * Returns true if a Revoked event exists matching (wallet, token, spender).
+ * This is optional but prevents signing attestations when no on-chain record exists.
  */
 async function hasRevokedRecordedOnchain(wallet, token, spender) {
-  const eventTopic = ethers.id("Revoked(address,address,address)");
-  const topics = [
-    eventTopic,
-    ethers.hexZeroPad(ethers.getAddress(wallet), 32),
-    token ? ethers.hexZeroPad(ethers.getAddress(token), 32) : null,
-    spender ? ethers.hexZeroPad(ethers.getAddress(spender), 32) : null,
-  ];
+  try {
+    const eventTopic = ethers.id("Revoked(address,address,address)");
+    const topics = [
+      eventTopic,
+      ethers.hexZeroPad(ethers.getAddress(wallet), 32),
+      token ? ethers.hexZeroPad(ethers.getAddress(token), 32) : null,
+      spender ? ethers.hexZeroPad(ethers.getAddress(spender), 32) : null,
+    ];
 
-  const payload = {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "eth_getLogs",
-    params: [
-      {
-        address: REVOKE_HELPER_ADDRESS,
-        topics,
-        fromBlock: "0x0",
-        toBlock: "latest",
-      },
-    ],
-  };
+    const payload = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_getLogs",
+      params: [
+        {
+          address: REVOKE_HELPER_ADDRESS,
+          topics,
+          fromBlock: "0x0",
+          toBlock: "latest",
+        },
+      ],
+    };
 
-  const res = await axios.post(NEYNAR_RPC, payload, {
-    headers: { "Content-Type": "application/json", "x-api-key": NEYNAR_API_KEY },
-    timeout: 15000,
-  });
+    const res = await axios.post(NEYNAR_RPC, payload, {
+      headers: { "Content-Type": "application/json", "x-api-key": NEYNAR_API_KEY },
+      timeout: 15000,
+    });
 
-  const logs = res?.data?.result;
-  return Array.isArray(logs) && logs.length > 0;
+    const logs = res?.data?.result;
+    return Array.isArray(logs) && logs.length > 0;
+  } catch (err) {
+    console.error("hasRevokedRecordedOnchain error:", err?.message || err);
+    throw err;
+  }
 }
 
 /* ------------------ endpoints ------------------ */
 
-app.get("/health", async (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
     attester: attesterWallet.address,
-    relayer: relayerWallet ? relayerWallet.address : null,
   });
 });
 
 /**
- * Attest endpoint
+ * POST /checkRevoked
  * Body: { wallet, token, spender }
- * Response: { sig, nonce, deadline, fid }
+ * Response: { revoked: true/false }
+ */
+app.post("/checkRevoked", async (req, res) => {
+  try {
+    const { wallet, token, spender } = req.body;
+    if (!wallet || !token || !spender) return res.status(400).json({ error: "wallet, token, spender required" });
+    const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
+    return res.json({ revoked });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "internal error", details: err?.message || String(err) });
+  }
+});
+
+/**
+ * POST /attest
+ * Body: { wallet, token, spender }
+ * Response: { sig, nonce, deadline, fid, issuedBy }
  */
 app.post("/attest", async (req, res) => {
   try {
     const { wallet, token = ethers.ZeroAddress, spender = ethers.ZeroAddress } = req.body;
     if (!wallet) return res.status(400).json({ error: "wallet required" });
 
-    // 1) verify Farcaster user via Neynar SDK exact call
+    // 1) verify Farcaster user via Neynar SDK
     const user = await fetchFarcasterUserByWallet(wallet);
     if (!user) {
       return res.status(403).json({ error: "wallet not a Farcaster user" });
     }
     const fid = String(user.fid);
 
-    // 2) optional: verify revoke recorded onchain - saves attestations for invalid attempts
+    // 2) optional: verify revoke recorded onchain to avoid signing for non-recorded revokes
     const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
     if (!revoked) {
       return res.status(400).json({ error: "no revoke recorded onchain; call recordRevoked first" });
@@ -188,7 +214,6 @@ app.post("/attest", async (req, res) => {
       spender: spender ? ethers.getAddress(spender) : ethers.ZeroAddress,
     };
 
-    // ethers v6: _signTypedData(domain, types, value)
     const signature = await attesterWallet._signTypedData(domain, ATTEST_TYPES, value);
 
     return res.json({
@@ -204,66 +229,7 @@ app.post("/attest", async (req, res) => {
   }
 });
 
-/**
- * checkRevoked - quick check if user's revoke recorded (callable by frontend to pre-check)
- * Body: { wallet, token, spender }
- */
-app.post("/checkRevoked", async (req, res) => {
-  try {
-    const { wallet, token, spender } = req.body;
-    if (!wallet || !token || !spender) return res.status(400).json({ error: "wallet, token, spender required" });
-    const revoked = await hasRevokedRecordedOnchain(wallet, token, spender);
-    return res.json({ revoked });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "internal error" });
-  }
-});
-
-/* ------------------ admin relayer endpoints (OPTIONAL) ------------------ */
-/**
- * POST /admin/migrate
- * Body: { action: "migrateToNew" | "rescueERC20", params: [...] }
- * Requires RELAYER_PK and RPC_HTTP configured. Use with extreme caution.
- */
-app.post("/admin/migrate", async (req, res) => {
-  if (!relayerWallet) return res.status(403).json({ error: "relayer not configured" });
-
-  // very simple auth: require attester address to match OR you can add a secret header
-  // In production, protect this endpoint more thoroughly (IP allowlist, API key, etc.)
-  const apiKey = req.headers["x-admin-key"];
-  if (!apiKey || apiKey !== process.env.ADMIN_API_KEY) return res.status(403).json({ error: "not authorized" });
-
-  const { action, params } = req.body;
-  if (!action) return res.status(400).json({ error: "action required" });
-
-  try {
-    // we need the ABI for your RevokeAndClaim's methods
-    const abi = [
-      "function migrateToNew(address newContract)",
-      "function rescueERC20(address token, address to, uint256 amount)"
-    ];
-    const contract = new ethers.Contract(VERIFYING_CONTRACT, abi, relayerWallet);
-
-    let tx;
-    if (action === "migrateToNew") {
-      const [newContract] = params;
-      tx = await contract.migrateToNew(newContract);
-    } else if (action === "rescueERC20") {
-      const [token, to, amount] = params;
-      tx = await contract.rescueERC20(token, to, amount);
-    } else {
-      return res.status(400).json({ error: "unsupported action" });
-    }
-
-    const receipt = await tx.wait();
-    return res.json({ txHash: receipt.transactionHash, receipt });
-  } catch (err) {
-    console.error("admin migrate failed", err);
-    return res.status(500).json({ error: "tx failed", details: err?.message || String(err) });
-  }
-});
-
+/* ------------------ start ------------------ */
 app.listen(PORT, () => {
-  console.log(`Attester running on port ${PORT}. attester=${attesterWallet.address} relayer=${relayerWallet ? relayerWallet.address : "none"}`);
+  console.log(`Attester running on port ${PORT}. attester=${attesterWallet.address}`);
 });
