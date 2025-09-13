@@ -47,10 +47,6 @@ app.use(
   })
 );
 
-// initialize Neynar SDK (✅ FIXED import style)
-const neynarConfig = new Configuration({ apiKey: NEYNAR_API_KEY });
-const neynarClient = new NeynarAPIClient(neynarConfig);
-
 // attester signer (only for signing attestations)
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
