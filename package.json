@@ -1,7 +1,7 @@
 {
   "name": "farguard-attester",
   "version": "1.0.0",
-  "description": "FarGuard attester backend — Neynar verification + EIP-712 attestation issuer (+ optional relayer)",
+  "description": "FarGuard attester backend — Neynar verification + EIP-712 attestations (attester-only, no relayer).",
   "main": "server.js",
   "type": "module",
   "scripts": {
