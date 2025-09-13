@@ -1,15 +1,3 @@
-/**
- * server.js
- * FarGuard Attester (Neynar verification + EIP-712 attestation)
- *
- * Endpoints:
- *  - GET  /health
- *  - POST /attest  { wallet, token, spender } -> returns { sig, nonce, deadline, fid }
- *  - POST /checkRevoked { wallet, token, spender } -> returns { revoked: true/false }
- *
- * Security: store ATTESTER_PK as Railway secret (or KMS). Rate-limit the API.
- */
-
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
