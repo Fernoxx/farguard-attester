@@ -39,6 +39,10 @@ const app = express();
 app.use(express.json({ limit: "100kb" }));
 app.use(cors());
 app.use(helmet());
+
+// trust proxy for rate limiting (Railway/Heroku/Vercel issue)
+app.set("trust proxy", 1);
+
 app.use(
   rateLimit({
     windowMs: 60_000,
