@@ -1,122 +1,123 @@
-// server.js
+// server.js - FarGuard Attester (Neynar-based FID check only)
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import axios from "axios";
 import { ethers } from "ethers";
+import axios from "axios";
 
 dotenv.config();
 
+/* ---------- env ---------- */
 const PORT = process.env.PORT || 3000;
 const ATTESTER_PK = process.env.ATTESTER_PK;
-const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
-const VERIFYING_CONTRACT = process.env.VERIFYING_CONTRACT; // RevokeAndClaim address
-const REVOKE_HELPER_ADDRESS = process.env.REVOKE_HELPER_ADDRESS; // RevokeHelper address
-const BASE_RPC = process.env.BASE_RPC; // Base RPC (Alchemy/QuickNode/etc)
+const VERIFYING_CONTRACT = process.env.VERIFYING_CONTRACT;
+const REVOKE_HELPER_ADDRESS = process.env.REVOKE_HELPER_ADDRESS;
+const BASE_RPC = process.env.BASE_RPC;
 const CHAIN_ID = Number(process.env.CHAIN_ID || 8453);
+const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
 
-if (!ATTESTER_PK || !NEYNAR_API_KEY || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC) {
-  console.error("Missing required env vars");
+if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC || !NEYNAR_API_KEY) {
+  console.error("❌ Missing env vars. Check ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY");
   process.exit(1);
 }
 
-const app = express();
-app.use(express.json({ limit: "128kb" }));
-app.use(cors());
-app.use(helmet());
-app.set("trust proxy", 1);
-app.use(rateLimit({ windowMs: 60_000, max: 60, message: { error: "Too many requests" } }));
-
-const provider = new ethers.JsonRpcProvider(BASE_RPC);
+/* ---------- providers ---------- */
+const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
-const REVOKE_HELPER_ABI = ["function hasRevoked(address user,address token,address spender) view returns (bool)"];
-const revokeHelper = new ethers.Contract(REVOKE_HELPER_ADDRESS, REVOKE_HELPER_ABI, provider);
 
+/* ---------- EIP-712 domain/types ---------- */
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
-const TYPES = {
+const ATTEST_TYPES = {
   Attestation: [
     { name: "wallet", type: "address" },
     { name: "fid", type: "uint256" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
     { name: "token", type: "address" },
-    { name: "spender", type: "address" }
-  ]
+    { name: "spender", type: "address" },
+  ],
 };
-
-async function neynarResolveWallet(wallet) {
-  const url = `https://api.neynar.com/v2/farcaster/user-by-verification?address=${wallet}`;
-  const res = await axios.get(url, { headers: { api_key: process.env.NEYNAR_API_KEY } });
-  return res.data?.result?.user ?? null;
+function buildDomain() {
+  return { name: NAME, version: VERSION, chainId: CHAIN_ID, verifyingContract: VERIFYING_CONTRACT };
 }
+
+/* ---------- express ---------- */
+const app = express();
+app.use(express.json());
+app.use(cors());
+app.use(helmet());
+app.set("trust proxy", 1);
+app.use(rateLimit({ windowMs: 60_000, max: 60 }));
+
+/* ---------- helpers ---------- */
+async function getFarcasterUser(wallet) {
+  const url = `https://api.neynar.com/v2/farcaster/user-by-verification?address=${wallet}`;
+  try {
+    const res = await axios.get(url, { headers: { "api_key": NEYNAR_API_KEY } });
+    if (res.data && res.data.result && res.data.result.user) {
+      return res.data.result.user; // includes fid
+    }
+    return null;
+  } catch (err) {
+    console.error("neynar error:", err?.response?.data || err.message);
+    return null;
+  }
+}
+
+async function hasRevokedOnBase(wallet, token, spender) {
+  const eventTopic = ethers.id("Revoked(address,address,address)");
+  const filter = {
+    address: REVOKE_HELPER_ADDRESS,
+    topics: [
+      eventTopic,
+      ethers.hexZeroPad(wallet, 32),
+      ethers.hexZeroPad(token, 32),
+      ethers.hexZeroPad(spender, 32),
+    ],
+    fromBlock: 0,
+    toBlock: "latest",
+  };
+  const logs = await baseProvider.getLogs(filter);
+  return logs.length > 0;
+}
+
+/* ---------- routes ---------- */
+app.get("/health", (req, res) => {
+  res.json({ ok: true, attester: attesterWallet.address });
+});
 
 app.post("/attest", async (req, res) => {
   try {
-    const { wallet, fid, token, spender } = req.body;
-    if (!wallet || fid === undefined || !token || !spender) {
-      return res.status(400).json({ error: "wallet, fid, token, spender required" });
+    const { wallet, token, spender } = req.body;
+    if (!wallet || !token || !spender) {
+      return res.status(400).json({ error: "wallet, token, spender required" });
     }
 
-    const walletAddr = ethers.getAddress(wallet);
-    const tokenAddr = ethers.getAddress(token);
-    const spenderAddr = ethers.getAddress(spender);
+    const user = await getFarcasterUser(wallet);
+    if (!user) return res.status(403).json({ error: "not a Farcaster user" });
+    const fid = user.fid;
 
-    // 1) Neynar verification: wallet must belong to fid
-    let user;
-    try {
-      user = await neynarResolveWallet(walletAddr);
-    } catch (err) {
-      console.error("Neynar fetch error:", err?.response?.data ?? err?.message ?? err);
-      return res.status(500).json({ error: "neynar error", details: String(err?.message || err) });
-    }
-    if (!user || Number(user.fid) !== Number(fid)) {
-      return res.status(403).json({ error: "wallet not linked to fid" });
-    }
+    const revoked = await hasRevokedOnBase(wallet, token, spender);
+    if (!revoked) return res.status(400).json({ error: "no revoke recorded on base" });
 
-    // 2) Check revoke recorded on-chain
-    let revoked = false;
-    try {
-      revoked = await revokeHelper.hasRevoked(walletAddr, tokenAddr, spenderAddr);
-    } catch (err) {
-      console.error("revokeHelper.hasRevoked error:", err?.message || err);
-      return res.status(500).json({ error: "revokeHelper check failed" });
-    }
-    if (!revoked) return res.status(400).json({ error: "no revoke recorded" });
-
-    // 3) Sign attestation
     const nonce = BigInt(Date.now()).toString();
-    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes TTL
-    const domain = {
-      name: NAME,
-      version: VERSION,
-      chainId: CHAIN_ID,
-      verifyingContract: VERIFYING_CONTRACT
-    };
-    const value = {
-      wallet: walletAddr,
-      fid: String(fid),
-      nonce,
-      deadline,
-      token: tokenAddr,
-      spender: spenderAddr
-    };
+    const deadline = Math.floor(Date.now() / 1000) + 600;
+    const domain = buildDomain();
+    const value = { wallet, fid, nonce, deadline, token, spender };
 
-    const sig = await attesterWallet._signTypedData(domain, TYPES, value);
+    const sig = await attesterWallet._signTypedData(domain, ATTEST_TYPES, value);
 
-    return res.json({ sig, nonce, deadline, fid: String(fid), issuedBy: attesterWallet.address });
+    return res.json({ sig, nonce, deadline, fid, issuedBy: attesterWallet.address });
   } catch (err) {
-    console.error("/attest failed:", err?.message || err);
-    return res.status(500).json({ error: "internal error", details: String(err?.message || err) });
+    console.error("/attest error:", err.message || err);
+    res.status(500).json({ error: "internal error", details: err.message });
   }
 });
 
-app.get("/health", (req, res) => {
-  return res.json({ ok: true, attester: attesterWallet.address });
-});
-
+/* ---------- start ---------- */
 app.listen(PORT, () => {
-  console.log(`Attester running on port ${PORT}, signer=${attesterWallet.address}`);
+  console.log(`✅ Attester running on port ${PORT}. Attester=${attesterWallet.address}`);
 });
