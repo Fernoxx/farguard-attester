@@ -136,9 +136,9 @@ async function hasRevokedOnBase(wallet, token, spender) {
   try {
     const topics = [
       REVOKE_EVENT_TOPIC,
-      ethers.hexZeroPad(ethers.getAddress(wallet), 32),
-      ethers.hexZeroPad(ethers.getAddress(token), 32),
-      ethers.hexZeroPad(ethers.getAddress(spender), 32),
+      ethers.zeroPadValue(ethers.getAddress(wallet), 32),
+      ethers.zeroPadValue(ethers.getAddress(token), 32),
+      ethers.zeroPadValue(ethers.getAddress(spender), 32),
     ];
 
     const filter = {
