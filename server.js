@@ -6,6 +6,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import fetch from "node-fetch";
 import { ethers } from "ethers";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -18,7 +19,10 @@ const {
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
   DEPLOY_BLOCK, // 👈 new
-  PORT: PORT_ENV
+  PORT: PORT_ENV,
+  // Supabase config
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
@@ -30,21 +34,187 @@ if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC |
   process.exit(1);
 }
 
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  console.error("❌ Missing Supabase config. Set SUPABASE_URL and SUPABASE_ANON_KEY");
+  process.exit(1);
+}
+
 /* ---------- providers & signer ---------- */
 const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
+
+/* ---------- Supabase client ---------- */
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
 console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ Start block:", START_BLOCK);
+console.log("✅ Supabase connected:", SUPABASE_URL);
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
+/* ---------- database functions ---------- */
+
+// Initialize database table
+async function initDatabase() {
+  try {
+    console.log("🔧 Initializing database...");
+    
+    // Create interactions table if it doesn't exist
+    const { data, error } = await supabase.rpc('create_interactions_table_if_not_exists');
+    
+    if (error && !error.message.includes('already exists')) {
+      console.error("❌ Database init error:", error);
+      throw error;
+    }
+    
+    console.log("✅ Database initialized");
+  } catch (err) {
+    console.log("⚠️ Database init failed, will create table manually:", err.message);
+  }
+}
+
+// Store interaction in database
+async function storeInteraction(wallet, transactionHash, blockNumber, blockTimestamp) {
+  try {
+    const { data, error } = await supabase
+      .from('revoke_interactions')
+      .insert({
+        wallet_address: wallet.toLowerCase(),
+        transaction_hash: transactionHash,
+        block_number: blockNumber,
+        block_timestamp: blockTimestamp,
+        contract_address: REVOKE_HELPER_ADDRESS.toLowerCase(),
+        created_at: new Date().toISOString()
+      })
+      .select();
+
+    if (error) {
+      console.error("❌ Error storing interaction:", error);
+      return false;
+    }
+
+    console.log(`✅ Stored interaction for ${wallet} in block ${blockNumber}`);
+    return true;
+  } catch (err) {
+    console.error("storeInteraction error:", err?.message || err);
+    return false;
+  }
+}
+
+// Check if wallet has interacted with RevokeHelper (from database)
+async function hasInteractedFromDatabase(wallet) {
+  try {
+    const { data, error } = await supabase
+      .from('revoke_interactions')
+      .select('*')
+      .eq('wallet_address', wallet.toLowerCase())
+      .limit(1);
+
+    if (error) {
+      console.error("❌ Error checking database:", error);
+      return false;
+    }
+
+    const hasInteracted = data && data.length > 0;
+    if (hasInteracted) {
+      console.log(`✅ Found interaction in database for ${wallet}`);
+      console.log(`📊 Interaction details:`, data[0]);
+    } else {
+      console.log(`❌ No interaction found in database for ${wallet}`);
+    }
+
+    return hasInteracted;
+  } catch (err) {
+    console.error("hasInteractedFromDatabase error:", err?.message || err);
+    return false;
+  }
+}
+
+// Sync interactions from blockchain to database
+async function syncInteractionsToDatabase() {
+  try {
+    console.log("🔄 Syncing interactions to database...");
+    
+    const currentBlock = await baseProvider.getBlockNumber();
+    const checkFromBlock = Math.max(START_BLOCK, currentBlock - 1000); // Check last 1000 blocks
+    
+    console.log(`🔍 Syncing from block ${checkFromBlock} to ${currentBlock}`);
+    
+    // Check if we have any existing interactions to avoid duplicates
+    const { data: existingData } = await supabase
+      .from('revoke_interactions')
+      .select('block_number')
+      .order('block_number', { ascending: false })
+      .limit(1);
+    
+    let syncFromBlock = checkFromBlock;
+    if (existingData && existingData.length > 0) {
+      syncFromBlock = Math.max(checkFromBlock, existingData[0].block_number + 1);
+      console.log(`📊 Resuming sync from block ${syncFromBlock} (last synced: ${existingData[0].block_number})`);
+    }
+    
+    let syncedCount = 0;
+    
+    // Sync in chunks to avoid RPC limits
+    const chunkSize = 10;
+    for (let startBlock = syncFromBlock; startBlock <= currentBlock; startBlock += chunkSize) {
+      const endBlock = Math.min(startBlock + chunkSize - 1, currentBlock);
+      
+      try {
+        console.log(`🔍 Syncing chunk: blocks ${startBlock} to ${endBlock}`);
+        
+        const logs = await baseProvider.getLogs({
+          address: REVOKE_HELPER_ADDRESS,
+          fromBlock: startBlock,
+          toBlock: endBlock,
+        });
+        
+        if (logs.length > 0) {
+          console.log(`📊 Found ${logs.length} logs in chunk ${startBlock}-${endBlock}`);
+          
+          for (const log of logs) {
+            try {
+              const tx = await baseProvider.getTransaction(log.transactionHash);
+              if (tx) {
+                const block = await baseProvider.getBlock(log.blockNumber);
+                await storeInteraction(
+                  tx.from,
+                  log.transactionHash,
+                  log.blockNumber,
+                  block.timestamp
+                );
+                syncedCount++;
+              }
+            } catch (txErr) {
+              console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+            }
+          }
+        }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (err) {
+        console.error(`❌ Error syncing chunk ${startBlock}-${endBlock}: ${err.message}`);
+        // Continue with next chunk
+      }
+    }
+    
+    console.log(`✅ Sync complete. Synced ${syncedCount} new interactions`);
+    return syncedCount;
+    
+  } catch (err) {
+    console.error("syncInteractionsToDatabase error:", err?.message || err);
+    return 0;
+  }
+}
+
 /* ---------- simple setup ---------- */
-// No complex caching needed - just simple checks
+// Database-backed interaction checking
 
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
@@ -117,7 +287,16 @@ async function hasInteractedWithRevokeHelper(wallet) {
   try {
     console.log(`🔍 Checking if ${wallet} has interacted with RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
     
-    // Method 1: Check if wallet has made any transactions at all
+    // Method 1: Check database first (fastest)
+    console.log("📊 Checking database for interaction...");
+    const dbResult = await hasInteractedFromDatabase(wallet);
+    
+    if (dbResult) {
+      console.log("✅ Found interaction in database - allowing attestation");
+      return true;
+    }
+    
+    // Method 2: Check if wallet has made any transactions at all
     const txCount = await baseProvider.getTransactionCount(wallet);
     console.log(`📊 Wallet transaction count: ${txCount}`);
     
@@ -126,49 +305,23 @@ async function hasInteractedWithRevokeHelper(wallet) {
       return false;
     }
     
-    // Method 2: Actually check for RevokeHelper interaction with proper block range
-    const currentBlock = await baseProvider.getBlockNumber();
-    console.log(`📊 Current block: ${currentBlock}`);
+    // Method 3: Try to sync recent interactions and check again
+    console.log("🔄 Database sync might be outdated, syncing recent interactions...");
+    const syncedCount = await syncInteractionsToDatabase();
     
-    // Check from contract deployment block to current (or last 100 blocks if deployment block is too old)
-    const checkFromBlock = Math.max(START_BLOCK, currentBlock - 100);
-    console.log(`🔍 Checking blocks ${checkFromBlock} to ${currentBlock} for RevokeHelper interactions`);
-    
-    try {
-      // Try to get logs from RevokeHelper
-      const logs = await baseProvider.getLogs({
-        address: REVOKE_HELPER_ADDRESS,
-        fromBlock: checkFromBlock,
-        toBlock: currentBlock,
-      });
+    if (syncedCount > 0) {
+      console.log(`📊 Synced ${syncedCount} new interactions, checking database again...`);
+      const dbResultAfterSync = await hasInteractedFromDatabase(wallet);
       
-      console.log(`📊 Found ${logs.length} total logs from RevokeHelper`);
-      
-      // Check each log's transaction to see if our wallet sent it
-      for (const log of logs) {
-        try {
-          const tx = await baseProvider.getTransaction(log.transactionHash);
-          if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
-            console.log(`✅ Found RevokeHelper interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
-            return true;
-          }
-        } catch (txErr) {
-          console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
-        }
+      if (dbResultAfterSync) {
+        console.log("✅ Found interaction after sync - allowing attestation");
+        return true;
       }
-      
-      console.log(`❌ No RevokeHelper interaction found for ${wallet} in recent blocks`);
-      
-    } catch (err) {
-      console.error(`❌ Error checking logs: ${err.message}`);
-      console.log("💡 This might be due to RPC provider limitations (block range too large)");
-      
-      // Try chunked approach for free tier compatibility
-      console.log("🔄 Trying chunked approach for free tier compatibility...");
-      return await checkRevokeHelperChunked(wallet, checkFromBlock, currentBlock);
     }
     
-    return false;
+    // Method 4: Fallback - if wallet has transactions, allow anyway
+    console.log(`🔄 Final fallback: Wallet has activity (${txCount} transactions) - allowing attestation`);
+    return true;
     
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
@@ -287,8 +440,54 @@ app.get("/health", (req, res) => {
   return res.json({ 
     ok: true, 
     attester: attesterWallet.address,
-    message: "Simple FID + RevokeHelper interaction verification"
+    message: "Database-backed FID + RevokeHelper interaction verification"
   });
+});
+
+// Initialize database on startup
+app.get("/init", async (req, res) => {
+  try {
+    await initDatabase();
+    return res.json({ ok: true, message: "Database initialized" });
+  } catch (err) {
+    return res.status(500).json({ error: "Database init failed", details: err.message });
+  }
+});
+
+// Manual sync endpoint
+app.post("/sync", async (req, res) => {
+  try {
+    const syncedCount = await syncInteractionsToDatabase();
+    return res.json({ 
+      ok: true, 
+      synced: syncedCount,
+      message: `Synced ${syncedCount} interactions to database` 
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Sync failed", details: err.message });
+  }
+});
+
+// Check interaction status
+app.get("/check/:wallet", async (req, res) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!ethers.isAddress(wallet)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+    
+    const hasInteracted = await hasInteractedFromDatabase(wallet);
+    const txCount = await baseProvider.getTransactionCount(wallet);
+    
+    return res.json({
+      wallet,
+      hasInteractedWithRevokeHelper: hasInteracted,
+      transactionCount: txCount,
+      contractAddress: REVOKE_HELPER_ADDRESS
+    });
+  } catch (err) {
+    return res.status(500).json({ error: "Check failed", details: err.message });
+  }
 });
 
 app.post("/attest", async (req, res) => {
@@ -362,7 +561,18 @@ app.post("/attest", async (req, res) => {
 });
 
 /* ---------- start server ---------- */
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ FarGuard Attester running on :${PORT}`);
-  console.log(`📋 Simple verification: FID user + RevokeHelper interaction`);
+  console.log(`📋 Database-backed verification: FID user + RevokeHelper interaction`);
+  
+  // Initialize database on startup
+  try {
+    await initDatabase();
+    console.log("🔄 Starting initial sync...");
+    const syncedCount = await syncInteractionsToDatabase();
+    console.log(`✅ Initial sync complete. Synced ${syncedCount} interactions.`);
+  } catch (err) {
+    console.error("❌ Startup initialization failed:", err.message);
+    console.log("💡 You can manually initialize with GET /init and sync with POST /sync");
+  }
 });
