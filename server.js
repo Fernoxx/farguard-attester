@@ -48,6 +48,7 @@ const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
     console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeHelper`);
+    console.log(`🔍 RevokeHelper address: ${REVOKE_HELPER_ADDRESS}`);
     
     // Get user's transaction count
     const txCount = await baseProvider.getTransactionCount(wallet);
@@ -60,31 +61,31 @@ async function hasInteractedWithRevokeHelper(wallet) {
     
     // Check user's recent transactions to see if any go to RevokeHelper
     console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
-    console.log(`🔍 RevokeHelper address: ${REVOKE_HELPER_ADDRESS}`);
     
     try {
-      // Check the last 100 transactions (increase from 20 to catch more interactions)
-      const transactionsToCheck = Math.min(100, txCount);
+      // Check the last 50 transactions for RevokeHelper interactions
+      const transactionsToCheck = Math.min(50, txCount);
       console.log(`🔍 Checking last ${transactionsToCheck} transactions out of ${txCount} total`);
       
       for (let i = Math.max(0, txCount - transactionsToCheck); i < txCount; i++) {
         try {
           const tx = await baseProvider.getTransaction(wallet, i);
           if (tx && tx.to) {
-            console.log(`🔍 Transaction ${i}: ${tx.from} -> ${tx.to}`);
             if (tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
               console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
               console.log(`✅ Transaction hash: ${tx.hash}`);
+              console.log(`✅ From: ${tx.from} -> To: ${tx.to}`);
               return true;
             }
           }
         } catch (txErr) {
-          console.log(`⚠️ Could not fetch transaction ${i}: ${txErr.message}`);
+          // Skip failed transactions silently
           continue;
         }
       }
       
       console.log("❌ No RevokeHelper interaction found in recent transactions");
+      console.log(`🔍 Checked last ${transactionsToCheck} transactions, none went to RevokeHelper`);
       return false;
       
     } catch (err) {
