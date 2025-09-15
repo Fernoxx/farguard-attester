@@ -95,21 +95,15 @@ async function getFarcasterUser(wallet) {
       // Get the user data from the first entry (they all have the same FID)
       const userData = entries[0];
       
-      // Now get the user's primary wallet (custody address) by FID
-      const primaryWallet = await getPrimaryWalletByFid(userData.fid);
+      // The provided wallet IS the user's selected primary wallet
+      // We don't need to fetch the custody address - the user has already selected
+      // which wallet they want to use as their primary wallet
+      console.log(`✅ Using user-selected primary wallet: ${wallet} for FID ${userData.fid}`);
       
-      if (primaryWallet) {
-        console.log(`✅ Found primary wallet for FID ${userData.fid}: ${primaryWallet}`);
-        // Return the user data but with the primary wallet address
-        return {
-          ...userData,
-          primary_wallet: primaryWallet
-        };
-      }
-      
-      // Fallback to the original wallet if we can't find primary
-      console.log(`⚠️ Could not find primary wallet for FID ${userData.fid}, using provided wallet: ${wallet}`);
-      return userData;
+      return {
+        ...userData,
+        primary_wallet: wallet  // The provided wallet is the user's selected primary wallet
+      };
     }
     return null;
   } catch (err) {
@@ -118,33 +112,6 @@ async function getFarcasterUser(wallet) {
   }
 }
 
-async function getPrimaryWalletByFid(fid) {
-  try {
-    const url = `https://api.neynar.com/v2/farcaster/user/bulk?fids=${fid}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-api-key": NEYNAR_API_KEY,
-        "accept": "application/json",
-        "x-neynar-experimental": "false",
-      },
-      timeout: 15000,
-    });
-
-    const data = await res.json();
-    const users = data.users;
-    if (Array.isArray(users) && users.length > 0) {
-      const user = users[0];
-      if (user.custody_address) {
-        return user.custody_address;
-      }
-    }
-    return null;
-  } catch (err) {
-    console.error("getPrimaryWalletByFid error:", err?.message || err);
-    return null;
-  }
-}
 
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
@@ -243,11 +210,9 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
-    // Use primary wallet for RevokeHelper interaction check if available
-    const walletToCheck = user.primary_wallet || walletAddr;
-    if (user.primary_wallet && user.primary_wallet !== walletAddr) {
-      console.log(`🔄 Using primary wallet for interaction check: ${user.primary_wallet} (instead of provided: ${walletAddr})`);
-    }
+    // Use the provided wallet (which is the user's selected primary wallet)
+    const walletToCheck = walletAddr;
+    console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
 
     // Simple check: has wallet interacted with RevokeHelper?
     console.log("🔍 Checking if wallet has interacted with RevokeHelper...");
@@ -268,11 +233,9 @@ app.post("/attest", async (req, res) => {
     const nonce = BigInt(Date.now()).toString();
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
-    // Use primary wallet in attestation if available, otherwise use provided wallet
-    const attestationWallet = user.primary_wallet || walletAddr;
-    if (user.primary_wallet && user.primary_wallet !== walletAddr) {
-      console.log(`🔄 Using primary wallet for attestation: ${attestationWallet} (instead of provided: ${walletAddr})`);
-    }
+    // Use the provided wallet (which is the user's selected primary wallet) for attestation
+    const attestationWallet = walletAddr;
+    console.log(`✅ Using user-selected primary wallet for attestation: ${attestationWallet}`);
     const value = { wallet: attestationWallet, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
 
     const sig = await attesterWallet.signTypedData(domain, ATTEST_TYPES, value);
