@@ -89,9 +89,9 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
   }
 }
 
-// Fast Alchemy RPC check
+// Ultra-fast check: Has user ever sent a transaction to RevokeHelper?
 async function checkWithAlchemyRPC(wallet) {
-  console.log("🚀 Using Alchemy RPC for fast check");
+  console.log("🚀 Using Alchemy RPC for ultra-fast check");
   
   const alchemyProvider = new ethers.JsonRpcProvider(ALCHEMY_RPC_URL, { name: "base", chainId: CHAIN_ID });
   
@@ -104,52 +104,43 @@ async function checkWithAlchemyRPC(wallet) {
     return false;
   }
   
-  // Get recent transactions (last 100)
-  const currentBlock = await alchemyProvider.getBlockNumber();
-  const fromBlock = Math.max(START_BLOCK, currentBlock - 1000); // Last 1000 blocks
+  // Check user's last 20 transactions to see if any go to RevokeHelper
+  console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
   
   try {
-    // Get logs from RevokeHelper contract in recent blocks
-    const logs = await alchemyProvider.getLogs({
-      address: REVOKE_HELPER_ADDRESS,
-      fromBlock,
-      toBlock: currentBlock,
-    });
-    
-    console.log(`📊 Found ${logs.length} logs from RevokeHelper in recent blocks`);
-    
-    // Check if any log's transaction was sent by our wallet
-    for (const log of logs) {
+    // Check the last 20 transactions (most users who interact with RevokeHelper will have done so recently)
+    for (let i = Math.max(0, txCount - 20); i < txCount; i++) {
       try {
-        const tx = await alchemyProvider.getTransaction(log.transactionHash);
-        if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
-          console.log(`✅ Found RevokeHelper interaction via Alchemy RPC`);
+        const tx = await alchemyProvider.getTransaction(wallet, i);
+        if (tx && tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
+          console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
           return true;
         }
       } catch (txErr) {
-        console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+        // Skip failed transactions
+        continue;
       }
     }
     
-    console.log("❌ No RevokeHelper interaction found in recent blocks");
+    console.log("❌ No RevokeHelper interaction found in recent transactions");
     return false;
     
-  } catch (logsErr) {
-    console.log(`⚠️ Could not get logs: ${logsErr.message}`);
+  } catch (err) {
+    console.log(`⚠️ Could not check user transactions: ${err.message}`);
     return null; // Try next method
   }
 }
 
-// Etherscan V2 API check
+// Etherscan V2 API check - check user's recent transactions only
 async function checkWithEtherscan(wallet) {
   console.log("🔍 Using Etherscan V2 API");
   
   const etherscanV2Url = "https://api.etherscan.io/v2/api";
   const baseChainId = 8453;
   
-  // Get user's transactions (limit to 100 for speed)
+  // Get user's recent transactions only (last 50 for speed)
   const response = await fetch(
-    `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=0&endblock=99999999&page=1&offset=100&sort=desc&apikey=${ETHERSCAN_API_KEY}`
+    `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=0&endblock=99999999&page=1&offset=50&sort=desc&apikey=${ETHERSCAN_API_KEY}`
   );
   
   const data = await response.json();
@@ -165,10 +156,10 @@ async function checkWithEtherscan(wallet) {
   );
   
   if (hasInteraction) {
-    console.log(`✅ Found RevokeHelper interaction via Etherscan`);
+    console.log(`✅ Found RevokeHelper interaction via Etherscan in recent transactions`);
     return true;
   } else {
-    console.log(`❌ No RevokeHelper interaction found via Etherscan`);
+    console.log(`❌ No RevokeHelper interaction found via Etherscan in recent transactions`);
     return false;
   }
 }
