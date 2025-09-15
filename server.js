@@ -43,6 +43,11 @@ console.log("✅ Start block:", START_BLOCK);
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
+/* ---------- cache setup ---------- */
+const revokedUsers = new Map(); // In-memory cache for fast access
+let lastSyncBlock = START_BLOCK; // Track last synced block
+let isSyncing = false; // Prevent concurrent syncs
+
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
@@ -122,9 +127,116 @@ async function hasRevokedOnBase(wallet, token, spender) {
   }
 }
 
+/* ---------- cache sync function ---------- */
+async function syncRevokedUsers(retryCount = 0) {
+  if (isSyncing) {
+    console.log("⏳ Sync already in progress, skipping...");
+    return;
+  }
+
+  isSyncing = true;
+  try {
+    console.log(`🔄 Syncing revoked users from block ${lastSyncBlock}...`);
+    
+    const filter = {
+      address: REVOKE_HELPER_ADDRESS,
+      topics: [REVOKE_EVENT_TOPIC],
+      fromBlock: lastSyncBlock,
+      toBlock: "latest",
+    };
+
+    const logs = await baseProvider.getLogs(filter);
+    
+    let newEntries = 0;
+    let processedLogs = 0;
+    
+    logs.forEach(log => {
+      try {
+        // Extract addresses from event topics
+        const wallet = ethers.getAddress(log.topics[1].slice(-20));
+        const token = ethers.getAddress(log.topics[2].slice(-20));
+        const spender = ethers.getAddress(log.topics[3].slice(-20));
+        
+        const key = `${wallet}-${token}-${spender}`;
+        if (!revokedUsers.has(key)) {
+          revokedUsers.set(key, {
+            wallet,
+            token,
+            spender,
+            blockNumber: log.blockNumber,
+            transactionHash: log.transactionHash,
+            timestamp: Date.now()
+          });
+          newEntries++;
+        }
+        processedLogs++;
+      } catch (err) {
+        console.error("Error processing log entry:", err);
+      }
+    });
+
+    // Update last sync block
+    if (logs.length > 0) {
+      lastSyncBlock = Math.max(...logs.map(log => log.blockNumber)) + 1;
+    }
+
+    console.log(`✅ Sync completed: ${newEntries} new entries, ${processedLogs} processed, ${revokedUsers.size} total cached, last block: ${lastSyncBlock}`);
+  } catch (err) {
+    console.error("❌ Sync error:", err?.message || err);
+    
+    // Retry logic for RPC errors
+    if (retryCount < 3 && (err.message?.includes('timeout') || err.message?.includes('rate limit'))) {
+      console.log(`🔄 Retrying sync in 10 seconds... (attempt ${retryCount + 1}/3)`);
+      setTimeout(() => {
+        isSyncing = false;
+        syncRevokedUsers(retryCount + 1);
+      }, 10000);
+      return;
+    }
+    
+    // Don't throw error to prevent server crash
+  } finally {
+    isSyncing = false;
+  }
+}
+
+/* ---------- cache check function ---------- */
+function hasRevokedInCache(wallet, token, spender) {
+  const key = `${wallet}-${token}-${spender}`;
+  return revokedUsers.has(key);
+}
+
 /* ---------- endpoints ---------- */
 app.get("/health", (req, res) => {
-  return res.json({ ok: true, attester: attesterWallet.address });
+  return res.json({ 
+    ok: true, 
+    attester: attesterWallet.address,
+    cache: {
+      revokedUsersCount: revokedUsers.size,
+      lastSyncBlock,
+      isSyncing
+    }
+  });
+});
+
+// Manual sync endpoint for debugging
+app.post("/sync", async (req, res) => {
+  try {
+    console.log("🔄 Manual sync requested");
+    await syncRevokedUsers();
+    return res.json({ 
+      success: true, 
+      message: "Sync completed",
+      cache: {
+        revokedUsersCount: revokedUsers.size,
+        lastSyncBlock,
+        isSyncing
+      }
+    });
+  } catch (err) {
+    console.error("Manual sync error:", err);
+    return res.status(500).json({ error: "Sync failed", details: err?.message });
+  }
 });
 
 app.post("/attest", async (req, res) => {
@@ -148,9 +260,10 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
-    const revoked = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
+    // Check cache instead of making RPC call
+    const revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
     if (!revoked) {
-      return res.status(400).json({ error: "no revoke recorded on base; call RevokeHelper.recordRevoked first" });
+      return res.status(400).json({ error: "no revoke recorded; call RevokeHelper.recordRevoked first" });
     }
 
     const nonce = BigInt(Date.now()).toString();
@@ -167,7 +280,32 @@ app.post("/attest", async (req, res) => {
   }
 });
 
-/* ---------- start ---------- */
-app.listen(PORT, () => {
-  console.log(`✅ Attester running on :${PORT}`);
-});
+/* ---------- startup and periodic sync ---------- */
+async function initializeServer() {
+  try {
+    console.log("🚀 Initializing FarGuard Attester...");
+    
+    // Initial sync on startup
+    console.log("📡 Performing initial sync...");
+    await syncRevokedUsers();
+    
+    // Set up periodic sync every 5 minutes
+    setInterval(async () => {
+      await syncRevokedUsers();
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    console.log("⏰ Periodic sync scheduled every 5 minutes");
+    
+    // Start server
+    app.listen(PORT, () => {
+      console.log(`✅ Attester running on :${PORT}`);
+      console.log(`📊 Cache status: ${revokedUsers.size} revoked users cached`);
+    });
+  } catch (err) {
+    console.error("❌ Failed to initialize server:", err);
+    process.exit(1);
+  }
+}
+
+// Start the server
+initializeServer();
