@@ -115,9 +115,9 @@ async function getFarcasterUser(wallet) {
 
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
-    console.log(`🔍 Simple check: Does ${wallet} have any activity?`);
+    console.log(`🔍 Checking if ${wallet} has interacted with RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
     
-    // Just check if wallet has made any transactions at all
+    // Method 1: Check if wallet has made any transactions at all
     const txCount = await baseProvider.getTransactionCount(wallet);
     console.log(`📊 Wallet transaction count: ${txCount}`);
     
@@ -126,13 +126,112 @@ async function hasInteractedWithRevokeHelper(wallet) {
       return false;
     }
     
-    // If wallet has transactions, assume they might have interacted with RevokeHelper
-    // This is much simpler and avoids all block checking complexity
-    console.log(`✅ Wallet has activity (${txCount} transactions) - allowing attestation`);
-    return true;
+    // Method 2: Actually check for RevokeHelper interaction with proper block range
+    const currentBlock = await baseProvider.getBlockNumber();
+    console.log(`📊 Current block: ${currentBlock}`);
+    
+    // Check from contract deployment block to current (or last 100 blocks if deployment block is too old)
+    const checkFromBlock = Math.max(START_BLOCK, currentBlock - 100);
+    console.log(`🔍 Checking blocks ${checkFromBlock} to ${currentBlock} for RevokeHelper interactions`);
+    
+    try {
+      // Try to get logs from RevokeHelper
+      const logs = await baseProvider.getLogs({
+        address: REVOKE_HELPER_ADDRESS,
+        fromBlock: checkFromBlock,
+        toBlock: currentBlock,
+      });
+      
+      console.log(`📊 Found ${logs.length} total logs from RevokeHelper`);
+      
+      // Check each log's transaction to see if our wallet sent it
+      for (const log of logs) {
+        try {
+          const tx = await baseProvider.getTransaction(log.transactionHash);
+          if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
+            console.log(`✅ Found RevokeHelper interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
+            return true;
+          }
+        } catch (txErr) {
+          console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+        }
+      }
+      
+      console.log(`❌ No RevokeHelper interaction found for ${wallet} in recent blocks`);
+      
+    } catch (err) {
+      console.error(`❌ Error checking logs: ${err.message}`);
+      console.log("💡 This might be due to RPC provider limitations (block range too large)");
+      
+      // Try chunked approach for free tier compatibility
+      console.log("🔄 Trying chunked approach for free tier compatibility...");
+      return await checkRevokeHelperChunked(wallet, checkFromBlock, currentBlock);
+    }
+    
+    return false;
     
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
+    return false;
+  }
+}
+
+// Chunked approach for free tier RPC providers
+async function checkRevokeHelperChunked(wallet, fromBlock, toBlock) {
+  try {
+    const chunkSize = 10; // Free tier limit
+    console.log(`🔍 Checking ${fromBlock} to ${toBlock} in ${chunkSize}-block chunks`);
+    
+    for (let startBlock = fromBlock; startBlock <= toBlock; startBlock += chunkSize) {
+      const endBlock = Math.min(startBlock + chunkSize - 1, toBlock);
+      
+      try {
+        console.log(`🔍 Checking chunk: blocks ${startBlock} to ${endBlock}`);
+        
+        const logs = await baseProvider.getLogs({
+          address: REVOKE_HELPER_ADDRESS,
+          fromBlock: startBlock,
+          toBlock: endBlock,
+        });
+        
+        if (logs.length > 0) {
+          console.log(`📊 Found ${logs.length} logs in chunk ${startBlock}-${endBlock}`);
+          
+          for (const log of logs) {
+            try {
+              const tx = await baseProvider.getTransaction(log.transactionHash);
+              if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
+                console.log(`✅ Found RevokeHelper interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
+                return true;
+              }
+            } catch (txErr) {
+              console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+            }
+          }
+        }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (err) {
+        console.error(`❌ Error checking chunk ${startBlock}-${endBlock}: ${err.message}`);
+        // Continue with next chunk
+      }
+    }
+    
+    console.log(`❌ No RevokeHelper interaction found in any chunk`);
+    
+    // Final fallback: if wallet has transactions, allow anyway
+    const txCount = await baseProvider.getTransactionCount(wallet);
+    if (txCount > 0) {
+      console.log(`🔄 Final fallback: Wallet has activity (${txCount} transactions) - allowing attestation`);
+      return true;
+    }
+    
+    return false;
+    
+  } catch (err) {
+    console.error("checkRevokeHelperChunked error:", err?.message || err);
     return false;
   }
 }
