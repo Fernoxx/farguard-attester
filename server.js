@@ -47,15 +47,15 @@ const ATTEST_TYPES = {
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
     { name: "token", type: "address" },
-    { name: "spender", type: "address" },
-  ],
+    { name: "spender", type: "address" }
+  ]
 };
 function buildDomain() {
   return {
     name: NAME,
     version: VERSION,
     chainId: CHAIN_ID,
-    verifyingContract: VERIFYING_CONTRACT,
+    verifyingContract: VERIFYING_CONTRACT
   };
 }
 
@@ -64,26 +64,23 @@ const app = express();
 app.use(express.json({ limit: "200kb" }));
 app.use(cors());
 app.use(helmet());
-// trust proxy for PaaS (Railway)
 app.set("trust proxy", 1);
 app.use(rateLimit({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_MAX, message: { error: "Too many requests" } }));
 
 /* ---------- helpers ---------- */
-
-// Check if RevokeHelper emitted Revoked(wallet, token, spender) on Base
 async function hasRevokedOnBase(wallet, token, spender) {
   const topics = [
     REVOKE_EVENT_TOPIC,
     ethers.hexZeroPad(ethers.getAddress(wallet), 32),
     ethers.hexZeroPad(ethers.getAddress(token), 32),
-    ethers.hexZeroPad(ethers.getAddress(spender), 32),
+    ethers.hexZeroPad(ethers.getAddress(spender), 32)
   ];
 
   const filter = {
     address: REVOKE_HELPER_ADDRESS,
     topics,
     fromBlock: 0,
-    toBlock: "latest",
+    toBlock: "latest"
   };
 
   try {
@@ -115,12 +112,19 @@ app.post("/attest", async (req, res) => {
     const spenderAddr = ethers.getAddress(spender);
 
     // 1. Verify wallet is a Farcaster user via Neynar
-    const userResp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses: [walletAddr] });
-    const user = userResp?.result?.user;
+    let userResp;
+    try {
+      userResp = await neynarClient.fetchBulkUsersByEthOrSolAddress({ addresses: [walletAddr] });
+    } catch (e) {
+      console.error("neynar fetch error:", e?.message || e);
+      return res.status(502).json({ error: "neynar API failed" });
+    }
+
+    const user = userResp?.result?.users?.[0];
     if (!user || !user.fid) {
       return res.status(403).json({ error: "not a Farcaster user" });
     }
-    const fid = user.fid;
+    const fid = Number(user.fid);
 
     // 2. Verify revoke recorded
     const revoked = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
