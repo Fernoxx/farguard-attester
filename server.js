@@ -50,49 +50,38 @@ async function hasInteractedWithRevokeHelper(wallet) {
     console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeHelper`);
     console.log(`🔍 RevokeHelper address: ${REVOKE_HELPER_ADDRESS}`);
     
-    // Get user's transaction count
-    const txCount = await baseProvider.getTransactionCount(wallet);
-    console.log(`📊 User transaction count: ${txCount}`);
+    // Get current block number
+    const currentBlock = await baseProvider.getBlockNumber();
+    console.log(`📊 Current block: ${currentBlock}`);
     
-    if (txCount === 0) {
-      console.log("❌ User has no transactions");
-      return false;
-    }
+    // Check last 100 blocks for transactions from this wallet to RevokeHelper
+    const blocksToCheck = 100;
+    console.log(`🔍 Checking last ${blocksToCheck} blocks for RevokeHelper interactions`);
     
-    // Check user's recent transactions to see if any go to RevokeHelper
-    console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
-    
-    try {
-      // Check the last 50 transactions for RevokeHelper interactions
-      const transactionsToCheck = Math.min(50, txCount);
-      console.log(`🔍 Checking last ${transactionsToCheck} transactions out of ${txCount} total`);
-      
-      for (let i = Math.max(0, txCount - transactionsToCheck); i < txCount; i++) {
-        try {
-          const tx = await baseProvider.getTransaction(wallet, i);
-          if (tx && tx.to) {
-            console.log(`🔍 Transaction ${i}: ${tx.from} -> ${tx.to}`);
-            if (tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
-              console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
+    for (let i = 0; i < blocksToCheck; i++) {
+      try {
+        const blockNumber = currentBlock - i;
+        const block = await baseProvider.getBlock(blockNumber, true);
+        
+        if (block && block.transactions) {
+          for (const tx of block.transactions) {
+            if (tx.from && tx.from.toLowerCase() === wallet.toLowerCase() && 
+                tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
+              console.log(`✅ Found RevokeHelper interaction in block ${blockNumber}`);
               console.log(`✅ Transaction hash: ${tx.hash}`);
               console.log(`✅ From: ${tx.from} -> To: ${tx.to}`);
               return true;
             }
           }
-        } catch (txErr) {
-          console.log(`⚠️ Could not fetch transaction ${i}: ${txErr.message}`);
-          continue;
         }
+      } catch (blockErr) {
+        console.log(`⚠️ Could not fetch block ${currentBlock - i}: ${blockErr.message}`);
+        continue;
       }
-      
-      console.log("❌ No RevokeHelper interaction found in recent transactions");
-      console.log(`🔍 Checked last ${transactionsToCheck} transactions, none went to RevokeHelper`);
-      return false;
-      
-    } catch (err) {
-      console.log(`⚠️ Could not check user transactions: ${err.message}`);
-      return false;
     }
+    
+    console.log("❌ No RevokeHelper interaction found in recent blocks");
+    return false;
     
   } catch (err) {
     console.error("RevokeHelper check error:", err?.message || err);
