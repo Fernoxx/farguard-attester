@@ -71,6 +71,7 @@ async function hasInteractedWithRevokeHelper(wallet) {
         try {
           const tx = await baseProvider.getTransaction(wallet, i);
           if (tx && tx.to) {
+            console.log(`🔍 Transaction ${i}: ${tx.from} -> ${tx.to}`);
             if (tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
               console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
               console.log(`✅ Transaction hash: ${tx.hash}`);
@@ -79,7 +80,7 @@ async function hasInteractedWithRevokeHelper(wallet) {
             }
           }
         } catch (txErr) {
-          // Skip failed transactions silently
+          console.log(`⚠️ Could not fetch transaction ${i}: ${txErr.message}`);
           continue;
         }
       }
