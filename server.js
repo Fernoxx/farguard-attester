@@ -38,58 +38,7 @@ console.log("✅ RevokeAndClaim contract:", VERIFYING_CONTRACT);
 console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ No anti-farming restrictions: All Farcaster users allowed");
 
-/* ---------- constants ---------- */
-const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
-
-/* ---------- Base RPC integration ---------- */
-
-// Simple check: Has user ever sent a transaction to RevokeAndClaim contract?
-async function hasInteractedWithRevokeAndClaim(wallet) {
-  try {
-    console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeAndClaim contract`);
-    console.log(`🔍 RevokeAndClaim address: ${VERIFYING_CONTRACT}`);
-    
-    // Get current block number
-    const currentBlock = await baseProvider.getBlockNumber();
-    console.log(`📊 Current block: ${currentBlock}`);
-    
-    // Check last 100 blocks for transactions from this wallet to RevokeAndClaim
-    const blocksToCheck = 100;
-    console.log(`🔍 Checking last ${blocksToCheck} blocks for RevokeAndClaim interactions`);
-    
-    for (let i = 0; i < blocksToCheck; i++) {
-      try {
-        const blockNumber = currentBlock - i;
-        const block = await baseProvider.getBlock(blockNumber, true);
-        
-        if (block && block.transactions) {
-          for (const tx of block.transactions) {
-            if (tx.from && tx.from.toLowerCase() === wallet.toLowerCase() && 
-                tx.to && tx.to.toLowerCase() === VERIFYING_CONTRACT.toLowerCase()) {
-              console.log(`✅ Found RevokeAndClaim interaction in block ${blockNumber}`);
-              console.log(`✅ Transaction hash: ${tx.hash}`);
-              console.log(`✅ From: ${tx.from} -> To: ${tx.to}`);
-              return true;
-            }
-          }
-        }
-      } catch (blockErr) {
-        console.log(`⚠️ Could not fetch block ${currentBlock - i}: ${blockErr.message}`);
-        continue;
-      }
-    }
-    
-    console.log("❌ No RevokeAndClaim interaction found in recent blocks");
-    return false;
-    
-  } catch (err) {
-    console.error("RevokeAndClaim check error:", err?.message || err);
-    return false;
-  }
-}
-
 /* ---------- simple setup ---------- */
-// Anti-farming checks using Farcaster data + optional Etherscan
 
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
@@ -189,10 +138,8 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       });
     }
     
-    // Check RevokeAndClaim interaction only
-    const hasRevokeAndClaimInteraction = await hasInteractedWithRevokeAndClaim(walletAddr);
-    
-    const eligible = hasRevokeAndClaimInteraction;
+    // All Farcaster users are eligible - they can claim directly from RevokeAndClaim contract
+    const eligible = true;
     
     return res.json({
       wallet: walletAddr,
@@ -200,14 +147,15 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       username: user.username,
       eligible,
       details: {
-        revokeAndClaimInteraction: {
-          hasInteracted: hasRevokeAndClaimInteraction,
-          contractAddress: VERIFYING_CONTRACT,
-          checkedVia: "Base RPC"
+        farcasterUser: {
+          isFarcasterUser: true,
+          fid: user.fid,
+          username: user.username
         }
       },
       requirements: {
-        revokeAndClaimInteraction: "Must interact with RevokeAndClaim contract"
+        farcasterAccount: "Must have a valid Farcaster account",
+        directClaiming: "Can claim rewards directly from RevokeAndClaim contract"
       }
     });
   } catch (err) {
@@ -244,25 +192,7 @@ app.post("/attest", async (req, res) => {
     // No anti-farming checks - allow all Farcaster users
     console.log("✅ Allowing all Farcaster users - no anti-farming restrictions");
     
-    // Check if user has interacted with RevokeHelper via Base RPC
-    console.log("🔍 Checking RevokeAndClaim interaction...");
-    
-    try {
-      const hasInteracted = await hasInteractedWithRevokeAndClaim(walletToCheck);
-      
-      if (!hasInteracted) {
-        return res.status(400).json({ 
-          error: "Must interact with RevokeAndClaim first",
-          details: "Please revoke some allowances using RevokeAndClaim before claiming rewards",
-          revokeAndClaimAddress: VERIFYING_CONTRACT
-        });
-      }
-      
-      console.log("✅ User has interacted with RevokeAndClaim");
-    } catch (err) {
-      console.error("Error checking RevokeAndClaim interaction:", err);
-      return res.status(500).json({ error: "failed to verify RevokeAndClaim interaction" });
-    }
+    console.log("✅ All Farcaster users can claim rewards directly from RevokeAndClaim contract");
 
     const nonce = BigInt(Date.now()).toString();
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;

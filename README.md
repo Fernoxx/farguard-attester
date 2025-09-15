@@ -1,12 +1,13 @@
-# FarGuard Attester with Database-Backed RevokeHelper Checking
+# FarGuard Attester - Simplified Farcaster Rewards
 
-This service provides attestations for Farcaster users who have interacted with the RevokeAndClaim contract. It verifies that users have legitimate Farcaster accounts and have performed actual token revocations before claiming rewards.
+This service provides EIP-712 attestations for Farcaster users to claim rewards directly from the RevokeAndClaim contract. It verifies that users have legitimate Farcaster accounts and allows them to claim rewards for token revocations.
 
 ## Features
 
-- ✅ **Database-backed interaction checking** - No more RPC limitations!
-- ✅ **Automatic sync** - Continuously syncs blockchain data to database
-- ✅ **Fast lookups** - Database queries are much faster than blockchain queries
+- ✅ **Direct Farcaster verification** - Uses Neynar API for user validation
+- ✅ **Simplified claiming** - Users claim rewards directly from RevokeAndClaim contract
+- ✅ **EIP-712 attestations** - Secure signature-based verification
+- ✅ **No complex requirements** - Just need a valid Farcaster account
 - ✅ **Reliable** - No dependency on RPC provider limitations
 - ✅ **Farcaster integration** - Uses Neynar API for FID verification
 
