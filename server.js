@@ -127,6 +127,45 @@ async function hasRevokedOnBase(wallet, token, spender) {
   }
 }
 
+/* ---------- real-time event listener ---------- */
+function setupRealTimeListener() {
+  try {
+    console.log("🎧 Setting up real-time event listener...");
+    
+    const filter = {
+      address: REVOKE_HELPER_ADDRESS,
+      topics: [REVOKE_EVENT_TOPIC]
+    };
+    
+    baseProvider.on(filter, (log) => {
+      try {
+        // Extract addresses from event topics
+        const wallet = ethers.getAddress(log.topics[1].slice(-20));
+        const token = ethers.getAddress(log.topics[2].slice(-20));
+        const spender = ethers.getAddress(log.topics[3].slice(-20));
+        
+        const key = `${wallet}-${token}-${spender}`;
+        revokedUsers.set(key, {
+          wallet,
+          token,
+          spender,
+          blockNumber: log.blockNumber,
+          transactionHash: log.transactionHash,
+          timestamp: Date.now()
+        });
+        
+        console.log(`🎯 Real-time revoke detected: ${key} (block ${log.blockNumber})`);
+      } catch (err) {
+        console.error("Error processing real-time event:", err);
+      }
+    });
+    
+    console.log("✅ Real-time event listener active");
+  } catch (err) {
+    console.error("Failed to setup real-time listener:", err);
+  }
+}
+
 /* ---------- cache sync function ---------- */
 async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
   if (isSyncing && !immediateSync) {
@@ -146,24 +185,46 @@ async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
     let logs = [];
     
     if (immediateSync) {
-      // For immediate sync, just check last 10 blocks (respects RPC limit)
-      const fromBlock = Math.max(lastSyncBlock, currentBlock - 9); // 10 blocks total
-      console.log(`🔍 Immediate sync: checking last 10 blocks (${fromBlock} to ${currentBlock})`);
+      // For immediate sync, check last 200 blocks in chunks of 10
+      // This covers ~4 seconds of blocks (200 blocks / 100 blocks per 2 sec)
+      const fromBlock = Math.max(lastSyncBlock, currentBlock - 199); // 200 blocks total
+      console.log(`🔍 Immediate sync: checking last 200 blocks (${fromBlock} to ${currentBlock})`);
       
-      const filter = {
-        address: REVOKE_HELPER_ADDRESS,
-        topics: [REVOKE_EVENT_TOPIC],
-        fromBlock,
-        toBlock: currentBlock,
-      };
+      const MAX_BLOCK_RANGE = 10;
+      let allLogs = [];
+      let currentFromBlock = fromBlock;
+      
+      while (currentFromBlock <= currentBlock) {
+        const currentToBlock = Math.min(currentFromBlock + MAX_BLOCK_RANGE - 1, currentBlock);
+        
+        const filter = {
+          address: REVOKE_HELPER_ADDRESS,
+          topics: [REVOKE_EVENT_TOPIC],
+          fromBlock: currentFromBlock,
+          toBlock: currentToBlock,
+        };
 
-      try {
-        logs = await baseProvider.getLogs(filter);
-        console.log(`✅ Immediate sync found ${logs.length} events`);
-      } catch (err) {
-        console.error(`❌ Immediate sync failed:`, err.message);
-        logs = [];
+        try {
+          const chunkLogs = await baseProvider.getLogs(filter);
+          allLogs = allLogs.concat(chunkLogs);
+          if (chunkLogs.length > 0) {
+            console.log(`✅ Found ${chunkLogs.length} events in blocks ${currentFromBlock}-${currentToBlock}`);
+          }
+        } catch (err) {
+          console.error(`❌ Error fetching blocks ${currentFromBlock}-${currentToBlock}:`, err.message);
+          // Continue with next chunk
+        }
+        
+        currentFromBlock = currentToBlock + 1;
+        
+        // Small delay to avoid rate limiting
+        if (currentFromBlock <= currentBlock) {
+          await new Promise(resolve => setTimeout(resolve, 50)); // Faster delay for immediate sync
+        }
       }
+      
+      logs = allLogs;
+      console.log(`✅ Immediate sync found ${logs.length} events total`);
     } else {
       // For periodic sync, use chunked approach
       const fromBlock = lastSyncBlock;
@@ -386,16 +447,19 @@ async function initializeServer() {
   try {
     console.log("🚀 Initializing FarGuard Attester...");
     
-    // Initial sync on startup
+    // Set up real-time event listener (most efficient)
+    setupRealTimeListener();
+    
+    // Initial sync on startup to catch any missed events
     console.log("📡 Performing initial sync...");
     await syncRevokedUsers();
     
-    // Set up periodic sync every 5 minutes
+    // Set up periodic sync every 10 minutes as backup
     setInterval(async () => {
       await syncRevokedUsers();
-    }, 5 * 60 * 1000); // 5 minutes
+    }, 10 * 60 * 1000); // 10 minutes (less frequent since we have real-time)
     
-    console.log("⏰ Periodic sync scheduled every 5 minutes");
+    console.log("⏰ Periodic sync scheduled every 10 minutes (backup)");
     
     // Start server
     app.listen(PORT, () => {
