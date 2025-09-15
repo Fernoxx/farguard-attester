@@ -37,7 +37,7 @@ console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
 console.log("✅ Base RPC:", BASE_RPC);
-console.log("✅ Anti-farming enabled: FID age + social activity checks");
+console.log("✅ No anti-farming restrictions: All Farcaster users allowed");
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
@@ -160,59 +160,7 @@ async function getFarcasterUser(wallet) {
 }
 
 
-// Anti-farming: Check if user is a legitimate Farcaster user with reasonable requirements
-async function isLegitimateFarcasterUser(wallet, user) {
-  try {
-    console.log(`🔍 Anti-farming check for FID ${user.fid}`);
-    
-    // Method 1: Check FID age (new accounts can't farm immediately)
-    const fidCreatedAt = new Date(user.created_at);
-    const daysSinceCreation = (Date.now() - fidCreatedAt.getTime()) / (1000 * 60 * 60 * 24);
-    
-    console.log(`📊 FID created: ${fidCreatedAt.toISOString()} (${daysSinceCreation.toFixed(1)} days ago)`);
-    
-    // Require account to be at least 30 days old (more reasonable)
-    if (daysSinceCreation < 30) {
-      console.log(`❌ Account too new (${daysSinceCreation.toFixed(1)} days) - need 30+ days`);
-      return false;
-    }
-    
-    // Method 2: Check if user has meaningful social activity
-    console.log(`📊 User activity - Followers: ${user.follower_count}, Following: ${user.following_count}, Casts: ${user.cast_count}`);
-    
-    // Require at least 10 followers OR 20 following OR 5 casts
-    const hasMinimumActivity = user.follower_count >= 10 || user.following_count >= 20 || user.cast_count >= 5;
-    
-    if (!hasMinimumActivity) {
-      console.log(`❌ Insufficient social activity - need 10+ followers OR 20+ following OR 5+ casts`);
-      return false;
-    }
-    
-    // Method 3: Check if user has verified addresses (indicates real user)
-    const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
-    console.log(`📊 Verified addresses: ${user.verified_addresses?.length || 0}`);
-    
-    if (hasVerifiedAddresses) {
-      console.log(`✅ Has verified addresses - strong legitimacy signal`);
-    } else {
-      console.log(`⚠️ No verified addresses - but allowing if other checks pass`);
-    }
-    
-    // Method 4: Additional checks for high-value users
-    const isHighValueUser = user.follower_count >= 50 || user.cast_count >= 20 || daysSinceCreation >= 90;
-    
-    if (isHighValueUser) {
-      console.log(`✅ High-value user detected - extra legitimacy`);
-    }
-    
-    console.log(`✅ User passed anti-farming checks - legitimate Farcaster user`);
-    return true;
-    
-  } catch (err) {
-    console.error("isLegitimateFarcasterUser error:", err?.message || err);
-    return false;
-  }
-}
+// Anti-farming checks removed - allow all Farcaster users
 
 // Simple anti-farming system - no blockchain checking needed!
 
@@ -221,7 +169,7 @@ app.get("/health", (req, res) => {
   return res.json({ 
     ok: true, 
     attester: attesterWallet.address,
-    message: "Anti-farming Farcaster attestation service"
+    message: "Farcaster attestation service - RevokeHelper interaction required"
   });
 });
 
@@ -243,16 +191,10 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       });
     }
     
-    const fidCreatedAt = new Date(user.created_at);
-    const daysSinceCreation = (Date.now() - fidCreatedAt.getTime()) / (1000 * 60 * 60 * 24);
-    
-    const hasMinimumActivity = user.follower_count >= 10 || user.following_count >= 20 || user.cast_count >= 5;
-    const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
-    
-    // Check RevokeHelper interaction
+    // Check RevokeHelper interaction only
     const hasRevokeHelperInteraction = await hasInteractedWithRevokeHelper(walletAddr);
     
-    const eligible = daysSinceCreation >= 30 && hasMinimumActivity && hasRevokeHelperInteraction;
+    const eligible = hasRevokeHelperInteraction;
     
     return res.json({
       wallet: walletAddr,
@@ -260,22 +202,6 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       username: user.username,
       eligible,
       details: {
-        accountAge: {
-          days: Math.floor(daysSinceCreation),
-          required: 30,
-          passed: daysSinceCreation >= 30
-        },
-        socialActivity: {
-          followers: user.follower_count,
-          following: user.following_count,
-          casts: user.cast_count,
-          hasMinimum: hasMinimumActivity,
-          requirements: "10+ followers OR 20+ following OR 5+ casts"
-        },
-        verifiedAddresses: {
-          count: user.verified_addresses?.length || 0,
-          hasVerified: hasVerifiedAddresses
-        },
         revokeHelperInteraction: {
           hasInteracted: hasRevokeHelperInteraction,
           contractAddress: REVOKE_HELPER_ADDRESS,
@@ -283,10 +209,7 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
         }
       },
       requirements: {
-        accountAge: "30+ days",
-        socialActivity: "10+ followers OR 20+ following OR 5+ casts",
-        revokeHelperInteraction: "Must interact with RevokeHelper contract",
-        verifiedAddresses: "preferred but not required"
+        revokeHelperInteraction: "Must interact with RevokeHelper contract"
       }
     });
   } catch (err) {
@@ -320,29 +243,8 @@ app.post("/attest", async (req, res) => {
     const walletToCheck = walletAddr;
     console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
 
-    // Anti-farming check: Is this a legitimate Farcaster user?
-    console.log("🔍 Anti-farming verification...");
-    
-    try {
-      const isLegitimate = await isLegitimateFarcasterUser(walletToCheck, user);
-      
-      if (!isLegitimate) {
-        return res.status(400).json({ 
-          error: "Account does not meet anti-farming requirements",
-          details: "Account must be at least 30 days old and have social activity (10+ followers OR 20+ following OR 5+ casts)",
-          requirements: {
-            accountAge: "30+ days",
-            socialActivity: "10+ followers OR 20+ following OR 5+ casts",
-            verifiedAddresses: "preferred but not required"
-          }
-        });
-      }
-      
-      console.log("✅ User passed anti-farming checks");
-    } catch (err) {
-      console.error("Error checking anti-farming:", err);
-      return res.status(500).json({ error: "failed to verify user legitimacy" });
-    }
+    // No anti-farming checks - allow all Farcaster users
+    console.log("✅ Allowing all Farcaster users - no anti-farming restrictions");
     
     // Check if user has interacted with RevokeHelper via Base RPC
     console.log("🔍 Checking RevokeHelper interaction...");
