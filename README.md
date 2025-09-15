@@ -23,9 +23,15 @@ ATTESTER_PK=your_private_key
 VERIFYING_CONTRACT=your_attestation_contract_address
 BASE_RPC=your_base_rpc_url
 NEYNAR_API_KEY=your_neynar_api_key
+
 # Optional
 PORT=8080
 CHAIN_ID=8453
+
+# FID Whitelist (Optional - if not set, all Farcaster users can claim)
+# Comma-separated list of FIDs that are allowed to claim rewards
+# Example: ALLOWED_FIDS=242597,123456,789012
+ALLOWED_FIDS=242597
 ```
 
 ### 2. Supabase Setup

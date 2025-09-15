@@ -17,7 +17,8 @@ const {
   BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
-  PORT: PORT_ENV
+  PORT: PORT_ENV,
+  ALLOWED_FIDS
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
@@ -37,6 +38,20 @@ console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeAndClaim contract:", VERIFYING_CONTRACT);
 console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ No anti-farming restrictions: All Farcaster users allowed");
+
+/* ---------- FID whitelist ---------- */
+const getAllowedFids = () => {
+  if (!ALLOWED_FIDS) {
+    console.log("⚠️ No ALLOWED_FIDS set - allowing all Farcaster users");
+    return null; // Allow all if no whitelist
+  }
+  
+  const fids = ALLOWED_FIDS.split(',').map(fid => Number(fid.trim())).filter(fid => !isNaN(fid));
+  console.log("✅ FID whitelist enabled:", fids);
+  return fids;
+};
+
+const allowedFids = getAllowedFids();
 
 /* ---------- simple setup ---------- */
 
@@ -138,8 +153,19 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       });
     }
     
-    // All Farcaster users are eligible - they can claim directly from RevokeAndClaim contract
-    const eligible = true;
+    const fid = Number(user.fid);
+    
+    // Check FID whitelist if enabled
+    const eligible = allowedFids ? allowedFids.includes(fid) : true;
+    
+    if (!eligible) {
+      return res.status(403).json({ 
+        error: "FID not authorized",
+        eligible: false,
+        details: `FID ${fid} is not in the allowed list`,
+        allowedFids: allowedFids 
+      });
+    }
     
     return res.json({
       wallet: walletAddr,
@@ -185,6 +211,17 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
+    // Check FID whitelist if enabled
+    if (allowedFids && !allowedFids.includes(fid)) {
+      console.warn(`❌ FID ${fid} not in whitelist`);
+      return res.status(403).json({ 
+        error: "FID not authorized", 
+        details: `FID ${fid} is not in the allowed list`,
+        allowedFids: allowedFids 
+      });
+    }
+    console.log(`✅ FID ${fid} is authorized to claim rewards`);
+
     // Use the provided wallet (which is the user's selected primary wallet)
     const walletToCheck = walletAddr;
     console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
@@ -208,6 +245,44 @@ app.post("/attest", async (req, res) => {
   } catch (err) {
     console.error("/attest error:", err?.message || err);
     return res.status(500).json({ error: "internal error", details: err?.message || String(err) });
+  }
+});
+
+// Debug endpoint to check what's happening
+app.get("/debug/:wallet", async (req, res) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!ethers.isAddress(wallet)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+    
+    const walletAddr = ethers.getAddress(wallet);
+    console.log(`🔍 Debug check for wallet: ${walletAddr}`);
+    
+    const user = await getFarcasterUser(walletAddr);
+    if (!user || !user.fid) {
+      return res.json({
+        wallet: walletAddr,
+        isFarcasterUser: false,
+        error: "Not a Farcaster user"
+      });
+    }
+    
+    const fid = Number(user.fid);
+    const isWhitelisted = allowedFids ? allowedFids.includes(fid) : true;
+    
+    return res.json({
+      wallet: walletAddr,
+      isFarcasterUser: true,
+      fid: fid,
+      username: user.username,
+      isWhitelisted: isWhitelisted,
+      allowedFids: allowedFids,
+      canClaim: isWhitelisted
+    });
+  } catch (err) {
+    console.error("Debug error:", err);
+    return res.status(500).json({ error: "Debug failed", details: err?.message });
   }
 });
 
