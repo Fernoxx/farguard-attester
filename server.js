@@ -5,7 +5,7 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { ethers } from "ethers";
-import Neynar from "@neynar/nodejs-sdk";   // ✅ CommonJS import fix
+import { NeynarAPIClient } from "@neynar/nodejs-sdk";
 
 dotenv.config();
 
@@ -30,7 +30,7 @@ const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainI
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
 // ✅ Proper Neynar client init
-const neynarClient = new Neynar.NeynarAPIClient({ apiKey: NEYNAR_API_KEY });
+const neynarClient = new NeynarAPIClient({ apiKey: NEYNAR_API_KEY });
 
 // Minimal interface for RevokeHelper logs
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
