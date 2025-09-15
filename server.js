@@ -139,18 +139,70 @@ async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
     const syncType = immediateSync ? "immediate" : "periodic";
     console.log(`🔄 ${syncType} sync from block ${lastSyncBlock}...`);
     
-    // For immediate sync, limit to last 100 blocks to be faster
-    const fromBlock = immediateSync ? Math.max(lastSyncBlock, await baseProvider.getBlockNumber() - 100) : lastSyncBlock;
+    // Get current block number
+    const currentBlock = await baseProvider.getBlockNumber();
+    console.log(`📊 Current block: ${currentBlock}, last sync: ${lastSyncBlock}`);
     
-    const filter = {
-      address: REVOKE_HELPER_ADDRESS,
-      topics: [REVOKE_EVENT_TOPIC],
-      fromBlock,
-      toBlock: "latest",
-    };
+    let logs = [];
+    
+    if (immediateSync) {
+      // For immediate sync, just check last 10 blocks (respects RPC limit)
+      const fromBlock = Math.max(lastSyncBlock, currentBlock - 9); // 10 blocks total
+      console.log(`🔍 Immediate sync: checking last 10 blocks (${fromBlock} to ${currentBlock})`);
+      
+      const filter = {
+        address: REVOKE_HELPER_ADDRESS,
+        topics: [REVOKE_EVENT_TOPIC],
+        fromBlock,
+        toBlock: currentBlock,
+      };
 
-    const logs = await baseProvider.getLogs(filter);
-    console.log(`📊 Found ${logs.length} revoke events in blocks ${fromBlock} to latest`);
+      try {
+        logs = await baseProvider.getLogs(filter);
+        console.log(`✅ Immediate sync found ${logs.length} events`);
+      } catch (err) {
+        console.error(`❌ Immediate sync failed:`, err.message);
+        logs = [];
+      }
+    } else {
+      // For periodic sync, use chunked approach
+      const fromBlock = lastSyncBlock;
+      const MAX_BLOCK_RANGE = 10;
+      let allLogs = [];
+      let currentFromBlock = fromBlock;
+      
+      while (currentFromBlock <= currentBlock) {
+        const currentToBlock = Math.min(currentFromBlock + MAX_BLOCK_RANGE - 1, currentBlock);
+        
+        console.log(`🔍 Fetching blocks ${currentFromBlock} to ${currentToBlock}...`);
+        
+        const filter = {
+          address: REVOKE_HELPER_ADDRESS,
+          topics: [REVOKE_EVENT_TOPIC],
+          fromBlock: currentFromBlock,
+          toBlock: currentToBlock,
+        };
+
+        try {
+          const chunkLogs = await baseProvider.getLogs(filter);
+          allLogs = allLogs.concat(chunkLogs);
+          console.log(`✅ Found ${chunkLogs.length} events in blocks ${currentFromBlock}-${currentToBlock}`);
+        } catch (err) {
+          console.error(`❌ Error fetching blocks ${currentFromBlock}-${currentToBlock}:`, err.message);
+          // Continue with next chunk
+        }
+        
+        currentFromBlock = currentToBlock + 1;
+        
+        // Small delay to avoid rate limiting
+        if (currentFromBlock <= currentBlock) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+      logs = allLogs;
+    }
+    console.log(`📊 Found ${logs.length} revoke events total`);
     
     let newEntries = 0;
     let processedLogs = 0;
