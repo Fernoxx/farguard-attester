@@ -128,20 +128,24 @@ async function hasRevokedOnBase(wallet, token, spender) {
 }
 
 /* ---------- cache sync function ---------- */
-async function syncRevokedUsers(retryCount = 0) {
-  if (isSyncing) {
+async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
+  if (isSyncing && !immediateSync) {
     console.log("⏳ Sync already in progress, skipping...");
     return;
   }
 
   isSyncing = true;
   try {
-    console.log(`🔄 Syncing revoked users from block ${lastSyncBlock}...`);
+    const syncType = immediateSync ? "immediate" : "periodic";
+    console.log(`🔄 ${syncType} sync from block ${lastSyncBlock}...`);
+    
+    // For immediate sync, limit to last 100 blocks to be faster
+    const fromBlock = immediateSync ? Math.max(lastSyncBlock, await baseProvider.getBlockNumber() - 100) : lastSyncBlock;
     
     const filter = {
       address: REVOKE_HELPER_ADDRESS,
       topics: [REVOKE_EVENT_TOPIC],
-      fromBlock: lastSyncBlock,
+      fromBlock,
       toBlock: "latest",
     };
 
@@ -260,8 +264,21 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
-    // Check cache instead of making RPC call
-    const revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
+    // Check cache first
+    let revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
+    
+    // If not in cache, try immediate sync to catch recent revokes
+    if (!revoked) {
+      console.log("🔄 Revoke not in cache, performing immediate sync...");
+      try {
+        await syncRevokedUsers(0, true); // immediateSync = true
+        revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
+      } catch (err) {
+        console.error("Immediate sync failed:", err);
+        // Continue with cache check even if sync fails
+      }
+    }
+    
     if (!revoked) {
       return res.status(400).json({ error: "no revoke recorded; call RevokeHelper.recordRevoked first" });
     }
