@@ -115,7 +115,7 @@ async function getFarcasterUser(wallet) {
 }
 
 
-// Simple anti-farming: Check if user is a legitimate Farcaster user
+// Anti-farming: Check if user is a legitimate Farcaster user with reasonable requirements
 async function isLegitimateFarcasterUser(wallet, user) {
   try {
     console.log(`🔍 Anti-farming check for FID ${user.fid}`);
@@ -126,27 +126,38 @@ async function isLegitimateFarcasterUser(wallet, user) {
     
     console.log(`📊 FID created: ${fidCreatedAt.toISOString()} (${daysSinceCreation.toFixed(1)} days ago)`);
     
-    // Require account to be at least 7 days old
-    if (daysSinceCreation < 7) {
-      console.log(`❌ Account too new (${daysSinceCreation.toFixed(1)} days) - potential farming`);
+    // Require account to be at least 30 days old (more reasonable)
+    if (daysSinceCreation < 30) {
+      console.log(`❌ Account too new (${daysSinceCreation.toFixed(1)} days) - need 30+ days`);
       return false;
     }
     
-    // Method 2: Check if user has some activity (followers, following, casts)
-    const hasActivity = user.follower_count > 0 || user.following_count > 0 || user.cast_count > 0;
+    // Method 2: Check if user has meaningful social activity
     console.log(`📊 User activity - Followers: ${user.follower_count}, Following: ${user.following_count}, Casts: ${user.cast_count}`);
     
-    if (!hasActivity) {
-      console.log(`❌ No social activity detected - potential farming account`);
+    // Require at least 10 followers OR 20 following OR 5 casts
+    const hasMinimumActivity = user.follower_count >= 10 || user.following_count >= 20 || user.cast_count >= 5;
+    
+    if (!hasMinimumActivity) {
+      console.log(`❌ Insufficient social activity - need 10+ followers OR 20+ following OR 5+ casts`);
       return false;
     }
     
-    // Method 3: Check if user has verified addresses (more legitimate users do)
+    // Method 3: Check if user has verified addresses (indicates real user)
     const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
     console.log(`📊 Verified addresses: ${user.verified_addresses?.length || 0}`);
     
-    if (!hasVerifiedAddresses) {
+    if (hasVerifiedAddresses) {
+      console.log(`✅ Has verified addresses - strong legitimacy signal`);
+    } else {
       console.log(`⚠️ No verified addresses - but allowing if other checks pass`);
+    }
+    
+    // Method 4: Additional checks for high-value users
+    const isHighValueUser = user.follower_count >= 50 || user.cast_count >= 20 || daysSinceCreation >= 90;
+    
+    if (isHighValueUser) {
+      console.log(`✅ High-value user detected - extra legitimacy`);
     }
     
     console.log(`✅ User passed anti-farming checks - legitimate Farcaster user`);
@@ -167,6 +178,67 @@ app.get("/health", (req, res) => {
     attester: attesterWallet.address,
     message: "Anti-farming Farcaster attestation service"
   });
+});
+
+// Check user eligibility without requesting attestation
+app.get("/check-eligibility/:wallet", async (req, res) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!ethers.isAddress(wallet)) {
+      return res.status(400).json({ error: "Invalid wallet address" });
+    }
+    
+    const walletAddr = ethers.getAddress(wallet);
+    const user = await getFarcasterUser(walletAddr);
+    
+    if (!user || !user.fid) {
+      return res.status(403).json({ 
+        error: "Not a Farcaster user",
+        eligible: false 
+      });
+    }
+    
+    const fidCreatedAt = new Date(user.created_at);
+    const daysSinceCreation = (Date.now() - fidCreatedAt.getTime()) / (1000 * 60 * 60 * 24);
+    
+    const hasMinimumActivity = user.follower_count >= 10 || user.following_count >= 20 || user.cast_count >= 5;
+    const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
+    
+    const eligible = daysSinceCreation >= 30 && hasMinimumActivity;
+    
+    return res.json({
+      wallet: walletAddr,
+      fid: user.fid,
+      username: user.username,
+      eligible,
+      details: {
+        accountAge: {
+          days: Math.floor(daysSinceCreation),
+          required: 30,
+          passed: daysSinceCreation >= 30
+        },
+        socialActivity: {
+          followers: user.follower_count,
+          following: user.following_count,
+          casts: user.cast_count,
+          hasMinimum: hasMinimumActivity,
+          requirements: "10+ followers OR 20+ following OR 5+ casts"
+        },
+        verifiedAddresses: {
+          count: user.verified_addresses?.length || 0,
+          hasVerified: hasVerifiedAddresses
+        }
+      },
+      requirements: {
+        accountAge: "30+ days",
+        socialActivity: "10+ followers OR 20+ following OR 5+ casts",
+        verifiedAddresses: "preferred but not required"
+      }
+    });
+  } catch (err) {
+    console.error("Check eligibility error:", err);
+    return res.status(500).json({ error: "Failed to check eligibility" });
+  }
 });
 
 app.post("/attest", async (req, res) => {
@@ -203,7 +275,12 @@ app.post("/attest", async (req, res) => {
       if (!isLegitimate) {
         return res.status(400).json({ 
           error: "Account does not meet anti-farming requirements",
-          details: "Account must be at least 7 days old and have social activity"
+          details: "Account must be at least 30 days old and have social activity (10+ followers OR 20+ following OR 5+ casts)",
+          requirements: {
+            accountAge: "30+ days",
+            socialActivity: "10+ followers OR 20+ following OR 5+ casts",
+            verifiedAddresses: "preferred but not required"
+          }
         });
       }
       
