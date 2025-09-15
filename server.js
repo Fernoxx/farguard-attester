@@ -141,203 +141,15 @@ async function hasInteractedWithRevokeHelper(wallet) {
   }
 }
 
-// Removed complex real-time listeners - using simple direct checks instead
-
-/* ---------- cache sync function ---------- */
-async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
-  if (isSyncing && !immediateSync) {
-    console.log("⏳ Sync already in progress, skipping...");
-    return;
-  }
-
-  isSyncing = true;
-  try {
-    const syncType = immediateSync ? "immediate" : "periodic";
-    console.log(`🔄 ${syncType} sync from block ${lastSyncBlock}...`);
-    
-    // Get current block number
-    const currentBlock = await baseProvider.getBlockNumber();
-    console.log(`📊 Current block: ${currentBlock}, last sync: ${lastSyncBlock}`);
-    
-    let logs = [];
-    
-    if (immediateSync) {
-      // For immediate sync, check last 200 blocks in chunks of 10
-      // This covers ~4 seconds of blocks (200 blocks / 100 blocks per 2 sec)
-      const fromBlock = Math.max(lastSyncBlock, currentBlock - 199); // 200 blocks total
-      console.log(`🔍 Immediate sync: checking last 200 blocks (${fromBlock} to ${currentBlock})`);
-      
-      const MAX_BLOCK_RANGE = 10;
-      let allLogs = [];
-      let currentFromBlock = fromBlock;
-      
-      while (currentFromBlock <= currentBlock) {
-        const currentToBlock = Math.min(currentFromBlock + MAX_BLOCK_RANGE - 1, currentBlock);
-        
-        const filter = {
-          address: REVOKE_HELPER_ADDRESS,
-          topics: [REVOKE_EVENT_TOPIC],
-          fromBlock: currentFromBlock,
-          toBlock: currentToBlock,
-        };
-
-        try {
-          const chunkLogs = await baseProvider.getLogs(filter);
-          allLogs = allLogs.concat(chunkLogs);
-          if (chunkLogs.length > 0) {
-            console.log(`✅ Found ${chunkLogs.length} events in blocks ${currentFromBlock}-${currentToBlock}`);
-          }
-        } catch (err) {
-          console.error(`❌ Error fetching blocks ${currentFromBlock}-${currentToBlock}:`, err.message);
-          // Continue with next chunk
-        }
-        
-        currentFromBlock = currentToBlock + 1;
-        
-        // Small delay to avoid rate limiting
-        if (currentFromBlock <= currentBlock) {
-          await new Promise(resolve => setTimeout(resolve, 50)); // Faster delay for immediate sync
-        }
-      }
-      
-      logs = allLogs;
-      console.log(`✅ Immediate sync found ${logs.length} events total`);
-    } else {
-      // For periodic sync, use chunked approach
-      const fromBlock = lastSyncBlock;
-      const MAX_BLOCK_RANGE = 10;
-      let allLogs = [];
-      let currentFromBlock = fromBlock;
-      
-      while (currentFromBlock <= currentBlock) {
-        const currentToBlock = Math.min(currentFromBlock + MAX_BLOCK_RANGE - 1, currentBlock);
-        
-        console.log(`🔍 Fetching blocks ${currentFromBlock} to ${currentToBlock}...`);
-        
-        const filter = {
-          address: REVOKE_HELPER_ADDRESS,
-          topics: [REVOKE_EVENT_TOPIC],
-          fromBlock: currentFromBlock,
-          toBlock: currentToBlock,
-        };
-
-        try {
-          const chunkLogs = await baseProvider.getLogs(filter);
-          allLogs = allLogs.concat(chunkLogs);
-          console.log(`✅ Found ${chunkLogs.length} events in blocks ${currentFromBlock}-${currentToBlock}`);
-        } catch (err) {
-          console.error(`❌ Error fetching blocks ${currentFromBlock}-${currentToBlock}:`, err.message);
-          // Continue with next chunk
-        }
-        
-        currentFromBlock = currentToBlock + 1;
-        
-        // Small delay to avoid rate limiting
-        if (currentFromBlock <= currentBlock) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-      
-      logs = allLogs;
-    }
-    console.log(`📊 Found ${logs.length} revoke events total`);
-    
-    let newEntries = 0;
-    let processedLogs = 0;
-    
-    logs.forEach((log, index) => {
-      try {
-        // Extract addresses from event topics
-        const wallet = ethers.getAddress(log.topics[1].slice(-20));
-        const token = ethers.getAddress(log.topics[2].slice(-20));
-        const spender = ethers.getAddress(log.topics[3].slice(-20));
-        
-        const key = `${wallet}-${token}-${spender}`;
-        console.log(`🔍 Event ${index + 1}: ${key} (block ${log.blockNumber})`);
-        
-        if (!revokedUsers.has(key)) {
-          revokedUsers.set(key, {
-            wallet,
-            token,
-            spender,
-            blockNumber: log.blockNumber,
-            transactionHash: log.transactionHash,
-            timestamp: Date.now()
-          });
-          newEntries++;
-          console.log(`✅ Added new entry: ${key}`);
-        } else {
-          console.log(`⏭️ Already cached: ${key}`);
-        }
-        processedLogs++;
-      } catch (err) {
-        console.error("Error processing log entry:", err);
-      }
-    });
-
-    // Update last sync block
-    if (logs.length > 0) {
-      lastSyncBlock = Math.max(...logs.map(log => log.blockNumber)) + 1;
-    }
-
-    console.log(`✅ Sync completed: ${newEntries} new entries, ${processedLogs} processed, ${revokedUsers.size} total cached, last block: ${lastSyncBlock}`);
-  } catch (err) {
-    console.error("❌ Sync error:", err?.message || err);
-    
-    // Retry logic for RPC errors
-    if (retryCount < 3 && (err.message?.includes('timeout') || err.message?.includes('rate limit'))) {
-      console.log(`🔄 Retrying sync in 10 seconds... (attempt ${retryCount + 1}/3)`);
-      setTimeout(() => {
-        isSyncing = false;
-        syncRevokedUsers(retryCount + 1);
-      }, 10000);
-      return;
-    }
-    
-    // Don't throw error to prevent server crash
-  } finally {
-    isSyncing = false;
-  }
-}
-
-/* ---------- cache check function ---------- */
-function hasRevokedInCache(wallet, token, spender) {
-  const key = `${wallet}-${token}-${spender}`;
-  return revokedUsers.has(key);
-}
+// Removed all complex caching and sync functions - using simple direct checks
 
 /* ---------- endpoints ---------- */
 app.get("/health", (req, res) => {
   return res.json({ 
     ok: true, 
     attester: attesterWallet.address,
-    cache: {
-      revokedUsersCount: revokedUsers.size,
-      interactedWalletsCount: interactedWallets.size,
-      lastSyncBlock,
-      isSyncing
-    }
+    message: "Simple FID + RevokeHelper interaction verification"
   });
-});
-
-// Manual sync endpoint for debugging
-app.post("/sync", async (req, res) => {
-  try {
-    console.log("🔄 Manual sync requested");
-    await syncRevokedUsers();
-    return res.json({ 
-      success: true, 
-      message: "Sync completed",
-      cache: {
-        revokedUsersCount: revokedUsers.size,
-        lastSyncBlock,
-        isSyncing
-      }
-    });
-  } catch (err) {
-    console.error("Manual sync error:", err);
-    return res.status(500).json({ error: "Sync failed", details: err?.message });
-  }
 });
 
 app.post("/attest", async (req, res) => {
@@ -391,35 +203,8 @@ app.post("/attest", async (req, res) => {
   }
 });
 
-/* ---------- startup and periodic sync ---------- */
-async function initializeServer() {
-  try {
-    console.log("🚀 Initializing FarGuard Attester...");
-    
-    // Set up real-time event listener (most efficient)
-    setupRealTimeListener();
-    
-    // Initial sync on startup to catch any missed events
-    console.log("📡 Performing initial sync...");
-    await syncRevokedUsers();
-    
-    // Set up periodic sync every 10 minutes as backup
-    setInterval(async () => {
-      await syncRevokedUsers();
-    }, 10 * 60 * 1000); // 10 minutes (less frequent since we have real-time)
-    
-    console.log("⏰ Periodic sync scheduled every 10 minutes (backup)");
-    
-    // Start server
-    app.listen(PORT, () => {
-      console.log(`✅ Attester running on :${PORT}`);
-      console.log(`📊 Cache status: ${revokedUsers.size} revoked users cached`);
-    });
-  } catch (err) {
-    console.error("❌ Failed to initialize server:", err);
-    process.exit(1);
-  }
-}
-
-// Start the server
-initializeServer();
+/* ---------- start server ---------- */
+app.listen(PORT, () => {
+  console.log(`✅ FarGuard Attester running on :${PORT}`);
+  console.log(`📋 Simple verification: FID user + RevokeHelper interaction`);
+});
