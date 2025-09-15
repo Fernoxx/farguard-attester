@@ -45,6 +45,7 @@ const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
 /* ---------- cache setup ---------- */
 const revokedUsers = new Map(); // In-memory cache for fast access
+const interactedWallets = new Map(); // Cache for wallets that interacted with RevokeHelper
 let lastSyncBlock = START_BLOCK; // Track last synced block
 let isSyncing = false; // Prevent concurrent syncs
 
@@ -103,27 +104,28 @@ async function getFarcasterUser(wallet) {
   }
 }
 
-async function hasRevokedOnBase(wallet, token, spender) {
+async function hasInteractedWithRevokeHelper(wallet) {
   try {
-    const topics = [
-      REVOKE_EVENT_TOPIC,
-      ethers.zeroPadValue(ethers.getAddress(wallet), 32),
-      ethers.zeroPadValue(ethers.getAddress(token), 32),
-      ethers.zeroPadValue(ethers.getAddress(spender), 32),
-    ];
-
+    // Check if wallet has made ANY transaction to RevokeHelper
     const filter = {
       address: REVOKE_HELPER_ADDRESS,
-      topics,
-      fromBlock: START_BLOCK,   // ✅ use deployment block
+      fromBlock: START_BLOCK,
       toBlock: "latest",
     };
 
     const logs = await baseProvider.getLogs(filter);
-    return Array.isArray(logs) && logs.length > 0;
+    
+    // Check if any transaction was from this wallet
+    for (const log of logs) {
+      const tx = await baseProvider.getTransaction(log.transactionHash);
+      if (tx.from.toLowerCase() === wallet.toLowerCase()) {
+        return true;
+      }
+    }
+    return false;
   } catch (err) {
-    console.error("hasRevokedOnBase error:", err?.message || err);
-    throw new Error("log lookup failed");
+    console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
+    throw new Error("interaction lookup failed");
   }
 }
 
@@ -132,29 +134,44 @@ function setupRealTimeListener() {
   try {
     console.log("🎧 Setting up real-time event listener...");
     
+    // Listen to ALL transactions to RevokeHelper (not just Revoked events)
     const filter = {
-      address: REVOKE_HELPER_ADDRESS,
-      topics: [REVOKE_EVENT_TOPIC]
+      address: REVOKE_HELPER_ADDRESS
     };
     
-    baseProvider.on(filter, (log) => {
+    baseProvider.on(filter, async (log) => {
       try {
-        // Extract addresses from event topics
-        const wallet = ethers.getAddress(log.topics[1].slice(-20));
-        const token = ethers.getAddress(log.topics[2].slice(-20));
-        const spender = ethers.getAddress(log.topics[3].slice(-20));
-        
-        const key = `${wallet}-${token}-${spender}`;
-        revokedUsers.set(key, {
-          wallet,
-          token,
-          spender,
-          blockNumber: log.blockNumber,
-          transactionHash: log.transactionHash,
-          timestamp: Date.now()
-        });
-        
-        console.log(`🎯 Real-time revoke detected: ${key} (block ${log.blockNumber})`);
+        // Get the transaction to find the sender
+        const tx = await baseProvider.getTransaction(log.transactionHash);
+        if (tx && tx.from) {
+          const wallet = ethers.getAddress(tx.from);
+          interactedWallets.set(wallet, {
+            wallet,
+            blockNumber: log.blockNumber,
+            transactionHash: log.transactionHash,
+            timestamp: Date.now()
+          });
+          
+          console.log(`🎯 Wallet interaction detected: ${wallet} (block ${log.blockNumber})`);
+          
+          // Also track specific revoke events if it's a Revoked event
+          if (log.topics[0] === REVOKE_EVENT_TOPIC) {
+            const token = ethers.getAddress(log.topics[2].slice(-20));
+            const spender = ethers.getAddress(log.topics[3].slice(-20));
+            const key = `${wallet}-${token}-${spender}`;
+            
+            revokedUsers.set(key, {
+              wallet,
+              token,
+              spender,
+              blockNumber: log.blockNumber,
+              transactionHash: log.transactionHash,
+              timestamp: Date.now()
+            });
+            
+            console.log(`🎯 Real-time revoke detected: ${key} (block ${log.blockNumber})`);
+          }
+        }
       } catch (err) {
         console.error("Error processing real-time event:", err);
       }
@@ -336,6 +353,7 @@ app.get("/health", (req, res) => {
     attester: attesterWallet.address,
     cache: {
       revokedUsersCount: revokedUsers.size,
+      interactedWalletsCount: interactedWallets.size,
       lastSyncBlock,
       isSyncing
     }
@@ -383,49 +401,36 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
+    // Check if wallet has interacted with RevokeHelper (any interaction)
+    console.log("🔍 Checking if wallet has interacted with RevokeHelper...");
+    
     // Check cache first
-    let revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
+    let hasInteracted = interactedWallets.has(walletAddr);
     
-    // If not in cache, try immediate sync to catch recent revokes
-    if (!revoked) {
-      console.log("🔄 Revoke not in cache, performing immediate sync...");
-      console.log("🔍 Looking for:", { wallet: walletAddr, token: tokenAddr, spender: spenderAddr });
+    if (!hasInteracted) {
+      // If not in cache, check blockchain
+      console.log("🔄 Wallet not in cache, checking blockchain...");
       try {
-        await syncRevokedUsers(0, true); // immediateSync = true
-        revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
-        console.log("🔍 After immediate sync, revoked:", revoked);
-        console.log("🔍 Cache size:", revokedUsers.size);
-      } catch (err) {
-        console.error("Immediate sync failed:", err);
-        // Continue with cache check even if sync fails
-      }
-    }
-    
-    if (!revoked) {
-      // Final fallback: check directly on blockchain (slow but accurate)
-      console.log("🔄 Final fallback: checking blockchain directly...");
-      try {
-        const directCheck = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
-        if (directCheck) {
-          console.log("✅ Found revoke via direct blockchain check, adding to cache");
-          const key = `${walletAddr}-${tokenAddr}-${spenderAddr}`;
-          revokedUsers.set(key, {
+        hasInteracted = await hasInteractedWithRevokeHelper(walletAddr);
+        if (hasInteracted) {
+          // Add to cache
+          interactedWallets.set(walletAddr, {
             wallet: walletAddr,
-            token: tokenAddr,
-            spender: spenderAddr,
             blockNumber: 'unknown',
             transactionHash: 'unknown',
             timestamp: Date.now()
           });
-          revoked = true;
+          console.log("✅ Wallet interaction found, added to cache");
         }
       } catch (err) {
-        console.error("Direct blockchain check failed:", err);
+        console.error("Error checking wallet interaction:", err);
       }
+    } else {
+      console.log("✅ Wallet interaction found in cache");
     }
     
-    if (!revoked) {
-      return res.status(400).json({ error: "no revoke recorded; call RevokeHelper.recordRevoked first" });
+    if (!hasInteracted) {
+      return res.status(400).json({ error: "wallet must interact with RevokeHelper first" });
     }
 
     const nonce = BigInt(Date.now()).toString();
