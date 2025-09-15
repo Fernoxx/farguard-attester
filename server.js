@@ -126,51 +126,57 @@ async function hasInteractedWithRevokeHelper(wallet) {
       return false;
     }
     
-    // Method 2: Check recent blocks for any transactions to RevokeHelper
+    // Method 2: Check recent blocks in small chunks (free tier compatible)
     const currentBlock = await baseProvider.getBlockNumber();
     console.log(`📊 Current block: ${currentBlock}`);
     
-    // Check last 1000 blocks (covers more history)
-    const fromBlock = Math.max(START_BLOCK, currentBlock - 1000);
-    console.log(`🔍 Checking blocks ${fromBlock} to ${currentBlock}`);
+    // Check last 50 blocks in 10-block chunks (free tier limit)
+    const blocksToCheck = 50;
+    const chunkSize = 10;
+    const fromBlock = Math.max(START_BLOCK, currentBlock - blocksToCheck);
     
-    try {
-      // Get all logs from RevokeHelper in this range
-      const logs = await baseProvider.getLogs({
-        address: REVOKE_HELPER_ADDRESS,
-        fromBlock,
-        toBlock: currentBlock,
-      });
+    console.log(`🔍 Checking blocks ${fromBlock} to ${currentBlock} in ${chunkSize}-block chunks`);
+    
+    for (let startBlock = fromBlock; startBlock <= currentBlock; startBlock += chunkSize) {
+      const endBlock = Math.min(startBlock + chunkSize - 1, currentBlock);
       
-      console.log(`📊 Found ${logs.length} total logs from RevokeHelper`);
-      
-      // Check each log's transaction
-      for (let i = 0; i < logs.length; i++) {
-        const log = logs[i];
-        try {
-          const tx = await baseProvider.getTransaction(log.transactionHash);
-          if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
-            console.log(`✅ Found interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
-            return true;
+      try {
+        console.log(`🔍 Checking chunk: blocks ${startBlock} to ${endBlock}`);
+        
+        // Get logs from RevokeHelper in this small range
+        const logs = await baseProvider.getLogs({
+          address: REVOKE_HELPER_ADDRESS,
+          fromBlock: startBlock,
+          toBlock: endBlock,
+        });
+        
+        if (logs.length > 0) {
+          console.log(`📊 Found ${logs.length} logs in chunk ${startBlock}-${endBlock}`);
+          
+          // Check each log's transaction
+          for (const log of logs) {
+            try {
+              const tx = await baseProvider.getTransaction(log.transactionHash);
+              if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
+                console.log(`✅ Found interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
+                return true;
+              }
+            } catch (txErr) {
+              console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+            }
           }
-        } catch (txErr) {
-          console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
         }
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (err) {
+        console.error(`❌ Error checking chunk ${startBlock}-${endBlock}: ${err.message}`);
+        // Continue with next chunk
       }
-    } catch (err) {
-      console.error(`❌ Error checking logs: ${err.message}`);
     }
     
-    // Method 3: Check if wallet has any ERC20 approvals that might indicate interaction
-    try {
-      console.log("🔍 Checking for any ERC20 approvals...");
-      // This is a fallback - if they have approvals, they might have interacted
-      // But this is not reliable, so we'll just log it
-    } catch (err) {
-      console.log("Could not check ERC20 approvals");
-    }
-    
-    console.log(`❌ No interaction found for ${wallet}`);
+    console.log(`❌ No interaction found for ${wallet} in recent ${blocksToCheck} blocks`);
     return false;
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
@@ -178,7 +184,66 @@ async function hasInteractedWithRevokeHelper(wallet) {
   }
 }
 
-// Removed all complex caching and sync functions - using simple direct checks
+// Alternative method: Check specific transaction patterns
+async function hasInteractedWithRevokeHelperAlternative(wallet) {
+  try {
+    console.log(`🔍 Alternative check: Looking for direct transactions to RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
+    
+    const currentBlock = await baseProvider.getBlockNumber();
+    const blocksToCheck = 100; // Check more blocks with alternative method
+    
+    // Check recent blocks for direct transactions to RevokeHelper
+    for (let blockNum = currentBlock; blockNum >= Math.max(START_BLOCK, currentBlock - blocksToCheck); blockNum--) {
+      try {
+        const block = await baseProvider.getBlock(blockNum, true);
+        if (!block || !block.transactions) continue;
+        
+        // Check each transaction in the block
+        for (const tx of block.transactions) {
+          if (tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase() && 
+              tx.from.toLowerCase() === wallet.toLowerCase()) {
+            console.log(`✅ Found direct transaction: ${wallet} -> RevokeHelper in block ${blockNum}`);
+            return true;
+          }
+        }
+        
+        // Small delay to avoid rate limiting
+        if (blockNum % 10 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+      } catch (err) {
+        console.log(`⚠️ Could not check block ${blockNum}: ${err.message}`);
+      }
+    }
+    
+    console.log(`❌ No direct transactions found for ${wallet} in recent ${blocksToCheck} blocks`);
+    return false;
+  } catch (err) {
+    console.error("hasInteractedWithRevokeHelperAlternative error:", err?.message || err);
+    return false;
+  }
+}
+
+// Simple method: Just check if wallet has any recent activity (fallback)
+async function hasRecentActivity(wallet) {
+  try {
+    const txCount = await baseProvider.getTransactionCount(wallet);
+    console.log(`📊 Wallet transaction count: ${txCount}`);
+    
+    // If wallet has made transactions, assume they might have interacted
+    // This is a very permissive fallback
+    if (txCount > 0) {
+      console.log(`✅ Wallet has activity (${txCount} transactions) - allowing attestation`);
+      return true;
+    }
+    
+    return false;
+  } catch (err) {
+    console.error("hasRecentActivity error:", err?.message || err);
+    return false;
+  }
+}
 
 /* ---------- endpoints ---------- */
 app.get("/health", (req, res) => {
