@@ -14,7 +14,6 @@ dotenv.config();
 const {
   ATTESTER_PK,
   VERIFYING_CONTRACT,
-  REVOKE_HELPER_ADDRESS,
   BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
@@ -24,8 +23,8 @@ const {
 const PORT = Number(PORT_ENV || 8080);
 const CHAIN_ID = Number(CHAIN_ID_ENV || 8453);
 
-if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC || !NEYNAR_API_KEY) {
-  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY");
+if (!ATTESTER_PK || !VERIFYING_CONTRACT || !BASE_RPC || !NEYNAR_API_KEY) {
+  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, BASE_RPC, NEYNAR_API_KEY");
   process.exit(1);
 }
 
@@ -35,7 +34,7 @@ const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
-console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
+console.log("✅ RevokeAndClaim contract:", VERIFYING_CONTRACT);
 console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ No anti-farming restrictions: All Farcaster users allowed");
 
@@ -44,19 +43,19 @@ const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
 /* ---------- Base RPC integration ---------- */
 
-// Simple check: Has user ever sent a transaction to RevokeHelper?
-async function hasInteractedWithRevokeHelper(wallet) {
+// Simple check: Has user ever sent a transaction to RevokeAndClaim contract?
+async function hasInteractedWithRevokeAndClaim(wallet) {
   try {
-    console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeHelper`);
-    console.log(`🔍 RevokeHelper address: ${REVOKE_HELPER_ADDRESS}`);
+    console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeAndClaim contract`);
+    console.log(`🔍 RevokeAndClaim address: ${VERIFYING_CONTRACT}`);
     
     // Get current block number
     const currentBlock = await baseProvider.getBlockNumber();
     console.log(`📊 Current block: ${currentBlock}`);
     
-    // Check last 100 blocks for transactions from this wallet to RevokeHelper
+    // Check last 100 blocks for transactions from this wallet to RevokeAndClaim
     const blocksToCheck = 100;
-    console.log(`🔍 Checking last ${blocksToCheck} blocks for RevokeHelper interactions`);
+    console.log(`🔍 Checking last ${blocksToCheck} blocks for RevokeAndClaim interactions`);
     
     for (let i = 0; i < blocksToCheck; i++) {
       try {
@@ -66,8 +65,8 @@ async function hasInteractedWithRevokeHelper(wallet) {
         if (block && block.transactions) {
           for (const tx of block.transactions) {
             if (tx.from && tx.from.toLowerCase() === wallet.toLowerCase() && 
-                tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
-              console.log(`✅ Found RevokeHelper interaction in block ${blockNumber}`);
+                tx.to && tx.to.toLowerCase() === VERIFYING_CONTRACT.toLowerCase()) {
+              console.log(`✅ Found RevokeAndClaim interaction in block ${blockNumber}`);
               console.log(`✅ Transaction hash: ${tx.hash}`);
               console.log(`✅ From: ${tx.from} -> To: ${tx.to}`);
               return true;
@@ -80,11 +79,11 @@ async function hasInteractedWithRevokeHelper(wallet) {
       }
     }
     
-    console.log("❌ No RevokeHelper interaction found in recent blocks");
+    console.log("❌ No RevokeAndClaim interaction found in recent blocks");
     return false;
     
   } catch (err) {
-    console.error("RevokeHelper check error:", err?.message || err);
+    console.error("RevokeAndClaim check error:", err?.message || err);
     return false;
   }
 }
@@ -190,10 +189,10 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       });
     }
     
-    // Check RevokeHelper interaction only
-    const hasRevokeHelperInteraction = await hasInteractedWithRevokeHelper(walletAddr);
+    // Check RevokeAndClaim interaction only
+    const hasRevokeAndClaimInteraction = await hasInteractedWithRevokeAndClaim(walletAddr);
     
-    const eligible = hasRevokeHelperInteraction;
+    const eligible = hasRevokeAndClaimInteraction;
     
     return res.json({
       wallet: walletAddr,
@@ -201,14 +200,14 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       username: user.username,
       eligible,
       details: {
-        revokeHelperInteraction: {
-          hasInteracted: hasRevokeHelperInteraction,
-          contractAddress: REVOKE_HELPER_ADDRESS,
+        revokeAndClaimInteraction: {
+          hasInteracted: hasRevokeAndClaimInteraction,
+          contractAddress: VERIFYING_CONTRACT,
           checkedVia: "Base RPC"
         }
       },
       requirements: {
-        revokeHelperInteraction: "Must interact with RevokeHelper contract"
+        revokeAndClaimInteraction: "Must interact with RevokeAndClaim contract"
       }
     });
   } catch (err) {
@@ -246,23 +245,23 @@ app.post("/attest", async (req, res) => {
     console.log("✅ Allowing all Farcaster users - no anti-farming restrictions");
     
     // Check if user has interacted with RevokeHelper via Base RPC
-    console.log("🔍 Checking RevokeHelper interaction...");
+    console.log("🔍 Checking RevokeAndClaim interaction...");
     
     try {
-      const hasInteracted = await hasInteractedWithRevokeHelper(walletToCheck);
+      const hasInteracted = await hasInteractedWithRevokeAndClaim(walletToCheck);
       
       if (!hasInteracted) {
         return res.status(400).json({ 
-          error: "Must interact with RevokeHelper first",
-          details: "Please revoke some allowances using RevokeHelper before claiming rewards",
-          revokeHelperAddress: REVOKE_HELPER_ADDRESS
+          error: "Must interact with RevokeAndClaim first",
+          details: "Please revoke some allowances using RevokeAndClaim before claiming rewards",
+          revokeAndClaimAddress: VERIFYING_CONTRACT
         });
       }
       
-      console.log("✅ User has interacted with RevokeHelper");
+      console.log("✅ User has interacted with RevokeAndClaim");
     } catch (err) {
-      console.error("Error checking RevokeHelper interaction:", err);
-      return res.status(500).json({ error: "failed to verify RevokeHelper interaction" });
+      console.error("Error checking RevokeAndClaim interaction:", err);
+      return res.status(500).json({ error: "failed to verify RevokeAndClaim interaction" });
     }
 
     const nonce = BigInt(Date.now()).toString();

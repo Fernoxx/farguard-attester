@@ -1,6 +1,6 @@
 # FarGuard Attester with Database-Backed RevokeHelper Checking
 
-This service provides attestations for Farcaster users who have interacted with the RevokeHelper contract, with all interaction data stored in Supabase for fast and reliable checking.
+This service provides attestations for Farcaster users who have interacted with the RevokeAndClaim contract. It verifies that users have legitimate Farcaster accounts and have performed actual token revocations before claiming rewards.
 
 ## Features
 
@@ -20,15 +20,8 @@ Create a `.env` file with:
 # Required
 ATTESTER_PK=your_private_key
 VERIFYING_CONTRACT=your_attestation_contract_address
-REVOKE_HELPER_ADDRESS=0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf
 BASE_RPC=your_base_rpc_url
 NEYNAR_API_KEY=your_neynar_api_key
-DEPLOY_BLOCK=your_contract_deployment_block
-
-# Supabase (Required for database functionality)
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your_supabase_anon_key
-
 # Optional
 PORT=8080
 CHAIN_ID=8453
