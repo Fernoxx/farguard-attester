@@ -150,11 +150,12 @@ async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
     };
 
     const logs = await baseProvider.getLogs(filter);
+    console.log(`📊 Found ${logs.length} revoke events in blocks ${fromBlock} to latest`);
     
     let newEntries = 0;
     let processedLogs = 0;
     
-    logs.forEach(log => {
+    logs.forEach((log, index) => {
       try {
         // Extract addresses from event topics
         const wallet = ethers.getAddress(log.topics[1].slice(-20));
@@ -162,6 +163,8 @@ async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
         const spender = ethers.getAddress(log.topics[3].slice(-20));
         
         const key = `${wallet}-${token}-${spender}`;
+        console.log(`🔍 Event ${index + 1}: ${key} (block ${log.blockNumber})`);
+        
         if (!revokedUsers.has(key)) {
           revokedUsers.set(key, {
             wallet,
@@ -172,6 +175,9 @@ async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
             timestamp: Date.now()
           });
           newEntries++;
+          console.log(`✅ Added new entry: ${key}`);
+        } else {
+          console.log(`⏭️ Already cached: ${key}`);
         }
         processedLogs++;
       } catch (err) {
@@ -270,12 +276,38 @@ app.post("/attest", async (req, res) => {
     // If not in cache, try immediate sync to catch recent revokes
     if (!revoked) {
       console.log("🔄 Revoke not in cache, performing immediate sync...");
+      console.log("🔍 Looking for:", { wallet: walletAddr, token: tokenAddr, spender: spenderAddr });
       try {
         await syncRevokedUsers(0, true); // immediateSync = true
         revoked = hasRevokedInCache(walletAddr, tokenAddr, spenderAddr);
+        console.log("🔍 After immediate sync, revoked:", revoked);
+        console.log("🔍 Cache size:", revokedUsers.size);
       } catch (err) {
         console.error("Immediate sync failed:", err);
         // Continue with cache check even if sync fails
+      }
+    }
+    
+    if (!revoked) {
+      // Final fallback: check directly on blockchain (slow but accurate)
+      console.log("🔄 Final fallback: checking blockchain directly...");
+      try {
+        const directCheck = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
+        if (directCheck) {
+          console.log("✅ Found revoke via direct blockchain check, adding to cache");
+          const key = `${walletAddr}-${tokenAddr}-${spenderAddr}`;
+          revokedUsers.set(key, {
+            wallet: walletAddr,
+            token: tokenAddr,
+            spender: spenderAddr,
+            blockNumber: 'unknown',
+            transactionHash: 'unknown',
+            timestamp: Date.now()
+          });
+          revoked = true;
+        }
+      } catch (err) {
+        console.error("Direct blockchain check failed:", err);
       }
     }
     
