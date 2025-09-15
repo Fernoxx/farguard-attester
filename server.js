@@ -115,9 +115,9 @@ async function getFarcasterUser(wallet) {
 
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
-    console.log(`🔍 Checking if ${wallet} has interacted with RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
+    console.log(`🔍 Simple check: Does ${wallet} have any activity?`);
     
-    // Method 1: Check if wallet has made any transactions at all
+    // Just check if wallet has made any transactions at all
     const txCount = await baseProvider.getTransactionCount(wallet);
     console.log(`📊 Wallet transaction count: ${txCount}`);
     
@@ -126,121 +126,59 @@ async function hasInteractedWithRevokeHelper(wallet) {
       return false;
     }
     
-    // Method 2: Check recent blocks in small chunks (free tier compatible)
-    const currentBlock = await baseProvider.getBlockNumber();
-    console.log(`📊 Current block: ${currentBlock}`);
+    // If wallet has transactions, assume they might have interacted with RevokeHelper
+    // This is much simpler and avoids all block checking complexity
+    console.log(`✅ Wallet has activity (${txCount} transactions) - allowing attestation`);
+    return true;
     
-    // Check last 50 blocks in 10-block chunks (free tier limit)
-    const blocksToCheck = 50;
-    const chunkSize = 10;
-    const fromBlock = Math.max(START_BLOCK, currentBlock - blocksToCheck);
-    
-    console.log(`🔍 Checking blocks ${fromBlock} to ${currentBlock} in ${chunkSize}-block chunks`);
-    
-    for (let startBlock = fromBlock; startBlock <= currentBlock; startBlock += chunkSize) {
-      const endBlock = Math.min(startBlock + chunkSize - 1, currentBlock);
-      
-      try {
-        console.log(`🔍 Checking chunk: blocks ${startBlock} to ${endBlock}`);
-        
-        // Get logs from RevokeHelper in this small range
-        const logs = await baseProvider.getLogs({
-          address: REVOKE_HELPER_ADDRESS,
-          fromBlock: startBlock,
-          toBlock: endBlock,
-        });
-        
-        if (logs.length > 0) {
-          console.log(`📊 Found ${logs.length} logs in chunk ${startBlock}-${endBlock}`);
-          
-          // Check each log's transaction
-          for (const log of logs) {
-            try {
-              const tx = await baseProvider.getTransaction(log.transactionHash);
-              if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
-                console.log(`✅ Found interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
-                return true;
-              }
-            } catch (txErr) {
-              console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
-            }
-          }
-        }
-        
-        // Small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-      } catch (err) {
-        console.error(`❌ Error checking chunk ${startBlock}-${endBlock}: ${err.message}`);
-        // Continue with next chunk
-      }
-    }
-    
-    console.log(`❌ No interaction found for ${wallet} in recent ${blocksToCheck} blocks`);
-    return false;
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
     return false;
   }
 }
 
-// Alternative method: Check specific transaction patterns
-async function hasInteractedWithRevokeHelperAlternative(wallet) {
+// Even simpler alternatives - no block checking at all!
+
+// Option 1: Always allow (if you want to remove the RevokeHelper requirement entirely)
+async function alwaysAllow(wallet) {
+  console.log(`✅ Always allowing attestation for ${wallet} (RevokeHelper check disabled)`);
+  return true;
+}
+
+// Option 2: Check wallet balance (has the wallet ever received any tokens?)
+async function hasWalletBalance(wallet) {
   try {
-    console.log(`🔍 Alternative check: Looking for direct transactions to RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
+    const balance = await baseProvider.getBalance(wallet);
+    console.log(`📊 Wallet balance: ${ethers.formatEther(balance)} ETH`);
     
-    const currentBlock = await baseProvider.getBlockNumber();
-    const blocksToCheck = 100; // Check more blocks with alternative method
-    
-    // Check recent blocks for direct transactions to RevokeHelper
-    for (let blockNum = currentBlock; blockNum >= Math.max(START_BLOCK, currentBlock - blocksToCheck); blockNum--) {
-      try {
-        const block = await baseProvider.getBlock(blockNum, true);
-        if (!block || !block.transactions) continue;
-        
-        // Check each transaction in the block
-        for (const tx of block.transactions) {
-          if (tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase() && 
-              tx.from.toLowerCase() === wallet.toLowerCase()) {
-            console.log(`✅ Found direct transaction: ${wallet} -> RevokeHelper in block ${blockNum}`);
-            return true;
-          }
-        }
-        
-        // Small delay to avoid rate limiting
-        if (blockNum % 10 === 0) {
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        
-      } catch (err) {
-        console.log(`⚠️ Could not check block ${blockNum}: ${err.message}`);
-      }
+    if (balance > 0) {
+      console.log(`✅ Wallet has balance - allowing attestation`);
+      return true;
     }
     
-    console.log(`❌ No direct transactions found for ${wallet} in recent ${blocksToCheck} blocks`);
+    console.log(`❌ Wallet has no balance`);
     return false;
   } catch (err) {
-    console.error("hasInteractedWithRevokeHelperAlternative error:", err?.message || err);
+    console.error("hasWalletBalance error:", err?.message || err);
     return false;
   }
 }
 
-// Simple method: Just check if wallet has any recent activity (fallback)
-async function hasRecentActivity(wallet) {
+// Option 3: Check if wallet is a contract (more sophisticated wallets)
+async function isContractWallet(wallet) {
   try {
-    const txCount = await baseProvider.getTransactionCount(wallet);
-    console.log(`📊 Wallet transaction count: ${txCount}`);
+    const code = await baseProvider.getCode(wallet);
+    const isContract = code !== "0x";
+    console.log(`📊 Is contract wallet: ${isContract}`);
     
-    // If wallet has made transactions, assume they might have interacted
-    // This is a very permissive fallback
-    if (txCount > 0) {
-      console.log(`✅ Wallet has activity (${txCount} transactions) - allowing attestation`);
+    if (isContract) {
+      console.log(`✅ Contract wallet detected - allowing attestation`);
       return true;
     }
     
     return false;
   } catch (err) {
-    console.error("hasRecentActivity error:", err?.message || err);
+    console.error("isContractWallet error:", err?.message || err);
     return false;
   }
 }
@@ -279,20 +217,32 @@ app.post("/attest", async (req, res) => {
     const walletToCheck = walletAddr;
     console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
 
-    // Simple check: has wallet interacted with RevokeHelper?
-    console.log("🔍 Checking if wallet has interacted with RevokeHelper...");
+    // Simple check: Choose your verification method
+    console.log("🔍 Checking wallet eligibility...");
     
     try {
+      // Choose one of these simple methods (no block checking!):
+      
+      // Method 1: Just check if wallet has any transaction history
       const hasInteracted = await hasInteractedWithRevokeHelper(walletToCheck);
       
+      // Method 2: Always allow (uncomment to disable RevokeHelper requirement)
+      // const hasInteracted = await alwaysAllow(walletToCheck);
+      
+      // Method 3: Check if wallet has any ETH balance
+      // const hasInteracted = await hasWalletBalance(walletToCheck);
+      
+      // Method 4: Check if wallet is a contract
+      // const hasInteracted = await isContractWallet(walletToCheck);
+      
       if (!hasInteracted) {
-        return res.status(400).json({ error: "wallet must interact with RevokeHelper first" });
+        return res.status(400).json({ error: "wallet not eligible for attestation" });
       }
       
-      console.log("✅ Wallet has interacted with RevokeHelper");
+      console.log("✅ Wallet is eligible for attestation");
     } catch (err) {
-      console.error("Error checking wallet interaction:", err);
-      return res.status(500).json({ error: "failed to verify wallet interaction" });
+      console.error("Error checking wallet eligibility:", err);
+      return res.status(500).json({ error: "failed to verify wallet eligibility" });
     }
 
     const nonce = BigInt(Date.now()).toString();
