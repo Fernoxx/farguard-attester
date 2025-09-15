@@ -43,11 +43,8 @@ console.log("✅ Start block:", START_BLOCK);
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
-/* ---------- cache setup ---------- */
-const revokedUsers = new Map(); // In-memory cache for fast access
-const interactedWallets = new Map(); // Cache for wallets that interacted with RevokeHelper
-let lastSyncBlock = START_BLOCK; // Track last synced block
-let isSyncing = false; // Prevent concurrent syncs
+/* ---------- simple setup ---------- */
+// No complex caching needed - just simple checks
 
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
@@ -106,82 +103,45 @@ async function getFarcasterUser(wallet) {
 
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
-    // Check if wallet has made ANY transaction to RevokeHelper
-    const filter = {
-      address: REVOKE_HELPER_ADDRESS,
-      fromBlock: START_BLOCK,
-      toBlock: "latest",
-    };
-
-    const logs = await baseProvider.getLogs(filter);
+    // Simple approach: check if wallet has any transaction history with RevokeHelper
+    // This is much more reliable than scanning blocks
+    const txCount = await baseProvider.getTransactionCount(wallet);
     
-    // Check if any transaction was from this wallet
-    for (const log of logs) {
-      const tx = await baseProvider.getTransaction(log.transactionHash);
-      if (tx.from.toLowerCase() === wallet.toLowerCase()) {
-        return true;
-      }
+    if (txCount === 0) {
+      return false; // Wallet has never made any transactions
     }
+    
+    // Check recent transactions (last 100) to see if any went to RevokeHelper
+    const currentBlock = await baseProvider.getBlockNumber();
+    const fromBlock = Math.max(0, currentBlock - 100);
+    
+    try {
+      const logs = await baseProvider.getLogs({
+        address: REVOKE_HELPER_ADDRESS,
+        fromBlock,
+        toBlock: currentBlock,
+      });
+      
+      // Check if any of these transactions were from our wallet
+      for (const log of logs) {
+        const tx = await baseProvider.getTransaction(log.transactionHash);
+        if (tx.from.toLowerCase() === wallet.toLowerCase()) {
+          return true;
+        }
+      }
+    } catch (err) {
+      console.log("Recent block check failed, trying alternative approach");
+    }
+    
     return false;
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
-    throw new Error("interaction lookup failed");
+    // If all else fails, assume they haven't interacted (safer)
+    return false;
   }
 }
 
-/* ---------- real-time event listener ---------- */
-function setupRealTimeListener() {
-  try {
-    console.log("🎧 Setting up real-time event listener...");
-    
-    // Listen to ALL transactions to RevokeHelper (not just Revoked events)
-    const filter = {
-      address: REVOKE_HELPER_ADDRESS
-    };
-    
-    baseProvider.on(filter, async (log) => {
-      try {
-        // Get the transaction to find the sender
-        const tx = await baseProvider.getTransaction(log.transactionHash);
-        if (tx && tx.from) {
-          const wallet = ethers.getAddress(tx.from);
-          interactedWallets.set(wallet, {
-            wallet,
-            blockNumber: log.blockNumber,
-            transactionHash: log.transactionHash,
-            timestamp: Date.now()
-          });
-          
-          console.log(`🎯 Wallet interaction detected: ${wallet} (block ${log.blockNumber})`);
-          
-          // Also track specific revoke events if it's a Revoked event
-          if (log.topics[0] === REVOKE_EVENT_TOPIC) {
-            const token = ethers.getAddress(log.topics[2].slice(-20));
-            const spender = ethers.getAddress(log.topics[3].slice(-20));
-            const key = `${wallet}-${token}-${spender}`;
-            
-            revokedUsers.set(key, {
-              wallet,
-              token,
-              spender,
-              blockNumber: log.blockNumber,
-              transactionHash: log.transactionHash,
-              timestamp: Date.now()
-            });
-            
-            console.log(`🎯 Real-time revoke detected: ${key} (block ${log.blockNumber})`);
-          }
-        }
-      } catch (err) {
-        console.error("Error processing real-time event:", err);
-      }
-    });
-    
-    console.log("✅ Real-time event listener active");
-  } catch (err) {
-    console.error("Failed to setup real-time listener:", err);
-  }
-}
+// Removed complex real-time listeners - using simple direct checks instead
 
 /* ---------- cache sync function ---------- */
 async function syncRevokedUsers(retryCount = 0, immediateSync = false) {
@@ -401,36 +361,20 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
-    // Check if wallet has interacted with RevokeHelper (any interaction)
+    // Simple check: has wallet interacted with RevokeHelper?
     console.log("🔍 Checking if wallet has interacted with RevokeHelper...");
     
-    // Check cache first
-    let hasInteracted = interactedWallets.has(walletAddr);
-    
-    if (!hasInteracted) {
-      // If not in cache, check blockchain
-      console.log("🔄 Wallet not in cache, checking blockchain...");
-      try {
-        hasInteracted = await hasInteractedWithRevokeHelper(walletAddr);
-        if (hasInteracted) {
-          // Add to cache
-          interactedWallets.set(walletAddr, {
-            wallet: walletAddr,
-            blockNumber: 'unknown',
-            transactionHash: 'unknown',
-            timestamp: Date.now()
-          });
-          console.log("✅ Wallet interaction found, added to cache");
-        }
-      } catch (err) {
-        console.error("Error checking wallet interaction:", err);
+    try {
+      const hasInteracted = await hasInteractedWithRevokeHelper(walletAddr);
+      
+      if (!hasInteracted) {
+        return res.status(400).json({ error: "wallet must interact with RevokeHelper first" });
       }
-    } else {
-      console.log("✅ Wallet interaction found in cache");
-    }
-    
-    if (!hasInteracted) {
-      return res.status(400).json({ error: "wallet must interact with RevokeHelper first" });
+      
+      console.log("✅ Wallet has interacted with RevokeHelper");
+    } catch (err) {
+      console.error("Error checking wallet interaction:", err);
+      return res.status(500).json({ error: "failed to verify wallet interaction" });
     }
 
     const nonce = BigInt(Date.now()).toString();
