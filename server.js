@@ -15,151 +15,80 @@ const {
   ATTESTER_PK,
   VERIFYING_CONTRACT,
   REVOKE_HELPER_ADDRESS,
+  BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
   DEPLOY_BLOCK, // 👈 new
-  PORT: PORT_ENV,
-  // Optional: Etherscan API for interaction checking
-  ETHERSCAN_API_KEY,
-  // Optional: Alchemy RPC for faster checking
-  ALCHEMY_RPC_URL
+  PORT: PORT_ENV
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
 const CHAIN_ID = Number(CHAIN_ID_ENV || 8453);
 const START_BLOCK = Number(DEPLOY_BLOCK || 0); // fallback to 0 if not set
 
-if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !NEYNAR_API_KEY) {
-  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, NEYNAR_API_KEY, DEPLOY_BLOCK");
+if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC || !NEYNAR_API_KEY) {
+  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY, DEPLOY_BLOCK");
   process.exit(1);
 }
 
 /* ---------- providers & signer ---------- */
+const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
+console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ Start block:", START_BLOCK);
 console.log("✅ Anti-farming enabled: FID age + social activity checks");
-console.log("✅ Etherscan V2 API:", ETHERSCAN_API_KEY ? "Available" : "Not configured");
-console.log("✅ Alchemy RPC:", ALCHEMY_RPC_URL ? "Available" : "Not configured");
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
-/* ---------- Etherscan API integration ---------- */
+/* ---------- Base RPC integration ---------- */
 
-// Check if user has interacted with RevokeHelper (multiple methods)
-async function hasInteractedWithRevokeHelperEtherscan(wallet) {
+// Simple check: Has user ever sent a transaction to RevokeHelper?
+async function hasInteractedWithRevokeHelper(wallet) {
   try {
     console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeHelper`);
     
-    // Method 1: Try Alchemy RPC first (fastest)
-    if (ALCHEMY_RPC_URL) {
-      try {
-        const hasInteraction = await checkWithAlchemyRPC(wallet);
-        if (hasInteraction !== null) {
-          return hasInteraction;
-        }
-      } catch (alchemyErr) {
-        console.log(`⚠️ Alchemy RPC failed, trying Etherscan: ${alchemyErr.message}`);
-      }
+    // Get user's transaction count
+    const txCount = await baseProvider.getTransactionCount(wallet);
+    console.log(`📊 User transaction count: ${txCount}`);
+    
+    if (txCount === 0) {
+      console.log("❌ User has no transactions");
+      return false;
     }
     
-    // Method 2: Try Etherscan V2 API
-    if (ETHERSCAN_API_KEY) {
-      try {
-        const hasInteraction = await checkWithEtherscan(wallet);
-        if (hasInteraction !== null) {
-          return hasInteraction;
-        }
-      } catch (etherscanErr) {
-        console.log(`⚠️ Etherscan API failed: ${etherscanErr.message}`);
-      }
-    }
+    // Check user's last 20 transactions to see if any go to RevokeHelper
+    console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
     
-    // Method 3: If both fail, allow user (fail-safe)
-    console.log("⚠️ Both Alchemy and Etherscan failed - allowing user");
-    return true;
+    try {
+      // Check the last 20 transactions (most users who interact with RevokeHelper will have done so recently)
+      for (let i = Math.max(0, txCount - 20); i < txCount; i++) {
+        try {
+          const tx = await baseProvider.getTransaction(wallet, i);
+          if (tx && tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
+            console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
+            return true;
+          }
+        } catch (txErr) {
+          // Skip failed transactions
+          continue;
+        }
+      }
+      
+      console.log("❌ No RevokeHelper interaction found in recent transactions");
+      return false;
+      
+    } catch (err) {
+      console.log(`⚠️ Could not check user transactions: ${err.message}`);
+      return false;
+    }
     
   } catch (err) {
     console.error("RevokeHelper check error:", err?.message || err);
-    return true; // Allow if check fails
-  }
-}
-
-// Ultra-fast check: Has user ever sent a transaction to RevokeHelper?
-async function checkWithAlchemyRPC(wallet) {
-  console.log("🚀 Using Alchemy RPC for ultra-fast check");
-  
-  const alchemyProvider = new ethers.JsonRpcProvider(ALCHEMY_RPC_URL, { name: "base", chainId: CHAIN_ID });
-  
-  // Get user's transaction count
-  const txCount = await alchemyProvider.getTransactionCount(wallet);
-  console.log(`📊 User transaction count: ${txCount}`);
-  
-  if (txCount === 0) {
-    console.log("❌ User has no transactions");
-    return false;
-  }
-  
-  // Check user's last 20 transactions to see if any go to RevokeHelper
-  console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
-  
-  try {
-    // Check the last 20 transactions (most users who interact with RevokeHelper will have done so recently)
-    for (let i = Math.max(0, txCount - 20); i < txCount; i++) {
-      try {
-        const tx = await alchemyProvider.getTransaction(wallet, i);
-        if (tx && tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
-          console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
-          return true;
-        }
-      } catch (txErr) {
-        // Skip failed transactions
-        continue;
-      }
-    }
-    
-    console.log("❌ No RevokeHelper interaction found in recent transactions");
-    return false;
-    
-  } catch (err) {
-    console.log(`⚠️ Could not check user transactions: ${err.message}`);
-    return null; // Try next method
-  }
-}
-
-// Etherscan V2 API check - check user's recent transactions only
-async function checkWithEtherscan(wallet) {
-  console.log("🔍 Using Etherscan V2 API");
-  
-  const etherscanV2Url = "https://api.etherscan.io/v2/api";
-  const baseChainId = 8453;
-  
-  // Get user's recent transactions only (last 50 for speed)
-  const response = await fetch(
-    `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=0&endblock=99999999&page=1&offset=50&sort=desc&apikey=${ETHERSCAN_API_KEY}`
-  );
-  
-  const data = await response.json();
-  
-  if (data.status !== "1") {
-    console.log(`⚠️ Etherscan API error: ${data.message}`);
-    return null; // Try next method
-  }
-  
-  // Check if ANY transaction is to RevokeHelper contract
-  const hasInteraction = data.result.some(tx => 
-    tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()
-  );
-  
-  if (hasInteraction) {
-    console.log(`✅ Found RevokeHelper interaction via Etherscan in recent transactions`);
-    return true;
-  } else {
-    console.log(`❌ No RevokeHelper interaction found via Etherscan in recent transactions`);
     return false;
   }
 }
@@ -324,7 +253,7 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
     const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
     
     // Check RevokeHelper interaction
-    const hasRevokeHelperInteraction = await hasInteractedWithRevokeHelperEtherscan(walletAddr);
+    const hasRevokeHelperInteraction = await hasInteractedWithRevokeHelper(walletAddr);
     
     const eligible = daysSinceCreation >= 30 && hasMinimumActivity && hasRevokeHelperInteraction;
     
@@ -353,7 +282,7 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
         revokeHelperInteraction: {
           hasInteracted: hasRevokeHelperInteraction,
           contractAddress: REVOKE_HELPER_ADDRESS,
-          checkedVia: ETHERSCAN_API_KEY ? "Etherscan V2 API" : "Not configured"
+          checkedVia: "Base RPC"
         }
       },
       requirements: {
@@ -418,11 +347,11 @@ app.post("/attest", async (req, res) => {
       return res.status(500).json({ error: "failed to verify user legitimacy" });
     }
     
-    // Optional: Check if user has interacted with RevokeHelper via Etherscan
+    // Check if user has interacted with RevokeHelper via Base RPC
     console.log("🔍 Checking RevokeHelper interaction...");
     
     try {
-      const hasInteracted = await hasInteractedWithRevokeHelperEtherscan(walletToCheck);
+      const hasInteracted = await hasInteractedWithRevokeHelper(walletToCheck);
       
       if (!hasInteracted) {
         return res.status(400).json({ 
