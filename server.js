@@ -102,15 +102,15 @@ async function hasRevokedOnBase(wallet, token, spender) {
   try {
     const topics = [
       REVOKE_EVENT_TOPIC,
-      ethers.zeroPadValue(wallet, 32),
-      ethers.zeroPadValue(token, 32),
-      ethers.zeroPadValue(spender, 32),
+      ethers.zeroPadValue(ethers.getAddress(wallet), 32),
+      ethers.zeroPadValue(ethers.getAddress(token), 32),
+      ethers.zeroPadValue(ethers.getAddress(spender), 32),
     ];
 
     const filter = {
       address: REVOKE_HELPER_ADDRESS,
       topics,
-      fromBlock: START_BLOCK, // 👈 safe starting block
+      fromBlock: START_BLOCK,   // ✅ use deployment block
       toBlock: "latest",
     };
 
