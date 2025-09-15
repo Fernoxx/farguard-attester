@@ -18,16 +18,14 @@ const {
   BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
-  DEPLOY_BLOCK, // 👈 new
   PORT: PORT_ENV
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
 const CHAIN_ID = Number(CHAIN_ID_ENV || 8453);
-const START_BLOCK = Number(DEPLOY_BLOCK || 0); // fallback to 0 if not set
 
 if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC || !NEYNAR_API_KEY) {
-  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY, DEPLOY_BLOCK");
+  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY");
   process.exit(1);
 }
 
@@ -39,7 +37,6 @@ console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
 console.log("✅ Base RPC:", BASE_RPC);
-console.log("✅ Start block:", START_BLOCK);
 console.log("✅ Anti-farming enabled: FID age + social activity checks");
 
 /* ---------- constants ---------- */
