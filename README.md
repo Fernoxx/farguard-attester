@@ -27,11 +27,6 @@ NEYNAR_API_KEY=your_neynar_api_key
 # Optional
 PORT=8080
 CHAIN_ID=8453
-
-# FID Whitelist (Optional - if not set, all Farcaster users can claim)
-# Comma-separated list of FIDs that are allowed to claim rewards
-# Example: ALLOWED_FIDS=242597,123456,789012
-ALLOWED_FIDS=242597
 ```
 
 ### 2. Supabase Setup
