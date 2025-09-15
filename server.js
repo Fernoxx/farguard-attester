@@ -1,4 +1,3 @@
-// server.js — FarGuard attester with Neynar (FID check) + Base RevokeHelper
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -31,7 +30,9 @@ if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC |
 const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
-const neynarClient = new NeynarAPIClient(new Configuration({ apiKey: NEYNAR_API_KEY }));
+// ✅ Correct initialization for Neynar client
+const neynarConfig = new Configuration({ apiKey: NEYNAR_API_KEY });
+const neynarClient = new NeynarAPIClient(neynarConfig);
 
 // Minimal interface for RevokeHelper: event Revoked(address,address,address)
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
