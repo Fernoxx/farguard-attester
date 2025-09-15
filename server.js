@@ -20,7 +20,9 @@ const {
   DEPLOY_BLOCK, // 👈 new
   PORT: PORT_ENV,
   // Optional: Etherscan API for interaction checking
-  ETHERSCAN_API_KEY
+  ETHERSCAN_API_KEY,
+  // Optional: Alchemy RPC for faster checking
+  ALCHEMY_RPC_URL
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
@@ -41,106 +43,133 @@ console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
 console.log("✅ Start block:", START_BLOCK);
 console.log("✅ Anti-farming enabled: FID age + social activity checks");
 console.log("✅ Etherscan V2 API:", ETHERSCAN_API_KEY ? "Available" : "Not configured");
+console.log("✅ Alchemy RPC:", ALCHEMY_RPC_URL ? "Available" : "Not configured");
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
 /* ---------- Etherscan API integration ---------- */
 
-// Check if wallet has interacted with RevokeHelper using Etherscan API (Optimized)
+// Check if user has interacted with RevokeHelper (multiple methods)
 async function hasInteractedWithRevokeHelperEtherscan(wallet) {
   try {
-    if (!ETHERSCAN_API_KEY) {
-      console.log("⚠️ Etherscan API not configured - skipping interaction check");
-      return true; // Allow if no Etherscan API
-    }
+    console.log(`🔍 Checking if ${wallet} has sent any transaction to RevokeHelper`);
     
-    console.log(`🔍 Checking ${wallet} interactions with RevokeHelper via Etherscan`);
-    
-    // Etherscan V2 API for Base chain (chainid=8453)
-    const etherscanV2Url = "https://api.etherscan.io/v2/api";
-    const baseChainId = 8453;
-    
-    // Method 1: Try getLogs first (most efficient for recent blocks)
-    try {
-      const currentBlock = await getCurrentBlockNumber();
-      const fromBlock = Math.max(START_BLOCK, currentBlock - 10000); // Last 10k blocks
-      
-      const logsResponse = await fetch(
-        `${etherscanV2Url}?chainid=${baseChainId}&module=logs&action=getLogs&address=${REVOKE_HELPER_ADDRESS}&fromBlock=${fromBlock}&toBlock=latest&apikey=${ETHERSCAN_API_KEY}`
-      );
-      
-      const logsData = await logsResponse.json();
-      
-      if (logsData.status === "1" && logsData.result.length > 0) {
-        // Check if any log's transaction was sent by our wallet
-        for (const log of logsData.result) {
-          try {
-            const txResponse = await fetch(
-              `${etherscanV2Url}?chainid=${baseChainId}&module=proxy&action=eth_getTransactionByHash&txhash=${log.transactionHash}&apikey=${ETHERSCAN_API_KEY}`
-            );
-            const txData = await txResponse.json();
-            
-            if (txData.result && txData.result.from.toLowerCase() === wallet.toLowerCase()) {
-              console.log(`✅ Found RevokeHelper interaction via Etherscan logs`);
-              return true;
-            }
-          } catch (txErr) {
-            console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
-          }
+    // Method 1: Try Alchemy RPC first (fastest)
+    if (ALCHEMY_RPC_URL) {
+      try {
+        const hasInteraction = await checkWithAlchemyRPC(wallet);
+        if (hasInteraction !== null) {
+          return hasInteraction;
         }
+      } catch (alchemyErr) {
+        console.log(`⚠️ Alchemy RPC failed, trying Etherscan: ${alchemyErr.message}`);
       }
-    } catch (logsErr) {
-      console.log(`⚠️ Logs method failed, trying txlist method: ${logsErr.message}`);
     }
     
-    // Method 2: Fallback to txlist (less efficient but more comprehensive)
-    const response = await fetch(
-      `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=${START_BLOCK}&endblock=99999999&page=1&offset=1000&sort=asc&apikey=${ETHERSCAN_API_KEY}`
-    );
-    
-    const data = await response.json();
-    
-    if (data.status !== "1") {
-      console.log(`⚠️ Etherscan API error: ${data.message}`);
-      return true; // Allow if API fails
+    // Method 2: Try Etherscan V2 API
+    if (ETHERSCAN_API_KEY) {
+      try {
+        const hasInteraction = await checkWithEtherscan(wallet);
+        if (hasInteraction !== null) {
+          return hasInteraction;
+        }
+      } catch (etherscanErr) {
+        console.log(`⚠️ Etherscan API failed: ${etherscanErr.message}`);
+      }
     }
     
-    // Check if any transaction is to RevokeHelper contract
-    const hasInteraction = data.result.some(tx => 
-      tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()
-    );
-    
-    if (hasInteraction) {
-      console.log(`✅ Found RevokeHelper interaction via Etherscan txlist`);
-      return true;
-    } else {
-      console.log(`❌ No RevokeHelper interaction found via Etherscan`);
-      return false;
-    }
+    // Method 3: If both fail, allow user (fail-safe)
+    console.log("⚠️ Both Alchemy and Etherscan failed - allowing user");
+    return true;
     
   } catch (err) {
-    console.error("Etherscan check error:", err?.message || err);
+    console.error("RevokeHelper check error:", err?.message || err);
     return true; // Allow if check fails
   }
 }
 
-// Helper function to get current block number using V2 API
-async function getCurrentBlockNumber() {
+// Fast Alchemy RPC check
+async function checkWithAlchemyRPC(wallet) {
+  console.log("🚀 Using Alchemy RPC for fast check");
+  
+  const alchemyProvider = new ethers.JsonRpcProvider(ALCHEMY_RPC_URL, { name: "base", chainId: CHAIN_ID });
+  
+  // Get user's transaction count
+  const txCount = await alchemyProvider.getTransactionCount(wallet);
+  console.log(`📊 User transaction count: ${txCount}`);
+  
+  if (txCount === 0) {
+    console.log("❌ User has no transactions");
+    return false;
+  }
+  
+  // Get recent transactions (last 100)
+  const currentBlock = await alchemyProvider.getBlockNumber();
+  const fromBlock = Math.max(START_BLOCK, currentBlock - 1000); // Last 1000 blocks
+  
   try {
-    if (!ETHERSCAN_API_KEY) return 99999999;
+    // Get logs from RevokeHelper contract in recent blocks
+    const logs = await alchemyProvider.getLogs({
+      address: REVOKE_HELPER_ADDRESS,
+      fromBlock,
+      toBlock: currentBlock,
+    });
     
-    const response = await fetch(
-      `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_blockNumber&apikey=${ETHERSCAN_API_KEY}`
-    );
-    const data = await response.json();
+    console.log(`📊 Found ${logs.length} logs from RevokeHelper in recent blocks`);
     
-    if (data.result) {
-      return parseInt(data.result, 16);
+    // Check if any log's transaction was sent by our wallet
+    for (const log of logs) {
+      try {
+        const tx = await alchemyProvider.getTransaction(log.transactionHash);
+        if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
+          console.log(`✅ Found RevokeHelper interaction via Alchemy RPC`);
+          return true;
+        }
+      } catch (txErr) {
+        console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+      }
     }
-    return 99999999;
-  } catch (err) {
-    return 99999999;
+    
+    console.log("❌ No RevokeHelper interaction found in recent blocks");
+    return false;
+    
+  } catch (logsErr) {
+    console.log(`⚠️ Could not get logs: ${logsErr.message}`);
+    return null; // Try next method
+  }
+}
+
+// Etherscan V2 API check
+async function checkWithEtherscan(wallet) {
+  console.log("🔍 Using Etherscan V2 API");
+  
+  const etherscanV2Url = "https://api.etherscan.io/v2/api";
+  const baseChainId = 8453;
+  
+  // Get user's transactions (limit to 100 for speed)
+  const response = await fetch(
+    `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=0&endblock=99999999&page=1&offset=100&sort=desc&apikey=${ETHERSCAN_API_KEY}`
+  );
+  
+  const data = await response.json();
+  
+  if (data.status !== "1") {
+    console.log(`⚠️ Etherscan API error: ${data.message}`);
+    return null; // Try next method
+  }
+  
+  // Check if ANY transaction is to RevokeHelper contract
+  const hasInteraction = data.result.some(tx => 
+    tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()
+  );
+  
+  if (hasInteraction) {
+    console.log(`✅ Found RevokeHelper interaction via Etherscan`);
+    return true;
+  } else {
+    console.log(`❌ No RevokeHelper interaction found via Etherscan`);
+    return false;
   }
 }
 
