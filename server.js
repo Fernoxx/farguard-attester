@@ -31,7 +31,7 @@ if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC |
 
 /* ---------- providers & signer ---------- */
 const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
-const attesterWallet = new ethers.Wallet(ATTESTER_PK); // signing only; ok without provider
+const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
@@ -77,38 +77,29 @@ app.use(rateLimit({ windowMs: 60_000, max: 60, message: { error: "Too many reque
  * Returns user object or null.
  */
 async function getFarcasterUser(wallet) {
-  try {
-    const url = `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses=${encodeURIComponent(wallet)}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-api-key": NEYNAR_API_KEY,
-        "accept": "application/json",
-        "x-neynar-experimental": "false",
-      },
-      timeout: 15000,
-    });
+  const url = `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses=${encodeURIComponent(wallet)}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "x-api-key": NEYNAR_API_KEY,
+      "accept": "application/json",
+      "x-neynar-experimental": "false",
+    },
+  });
 
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch (e) {
-      console.warn("Neynar returned non-json:", text.slice(0, 200));
-      return null;
-    }
-
-    // Neynar returns `users: []` on success; be defensive:
-    if (Array.isArray(data.users) && data.users.length > 0) {
-      return data.users[0];
-    }
-    // fallback shapes (some SDK responses) — defensive:
-    if (data.result && data.result.user) return data.result.user;
-    if (data.users && Array.isArray(data.users) && data.users.length === 0) return null;
-
+  if (!res.ok) {
+    console.error("Neynar HTTP error:", res.status, await res.text());
     return null;
-  } catch (err) {
-    console.error("getFarcasterUser error:", err?.message || err);
-    throw new Error("neynar lookup failed");
   }
+
+  const data = await res.json();
+  console.log("Neynar API raw response:", data);
+
+  if (Array.isArray(data.users) && data.users.length > 0) {
+    return data.users[0]; // <- correct shape
+  }
+
+  return null;
 }
 
 /**
@@ -116,27 +107,22 @@ async function getFarcasterUser(wallet) {
  * Returns boolean.
  */
 async function hasRevokedOnBase(wallet, token, spender) {
-  try {
-    const topics = [
-      REVOKE_EVENT_TOPIC,
-      ethers.hexZeroPad(ethers.getAddress(wallet), 32),
-      ethers.hexZeroPad(ethers.getAddress(token), 32),
-      ethers.hexZeroPad(ethers.getAddress(spender), 32),
-    ];
+  const topics = [
+    REVOKE_EVENT_TOPIC,
+    ethers.hexZeroPad(ethers.getAddress(wallet), 32),
+    ethers.hexZeroPad(ethers.getAddress(token), 32),
+    ethers.hexZeroPad(ethers.getAddress(spender), 32),
+  ];
 
-    const filter = {
-      address: REVOKE_HELPER_ADDRESS,
-      topics,
-      fromBlock: 0,
-      toBlock: "latest",
-    };
+  const filter = {
+    address: REVOKE_HELPER_ADDRESS,
+    topics,
+    fromBlock: 0,
+    toBlock: "latest",
+  };
 
-    const logs = await baseProvider.getLogs(filter);
-    return Array.isArray(logs) && logs.length > 0;
-  } catch (err) {
-    console.error("hasRevokedOnBase error:", err?.message || err);
-    throw new Error("log lookup failed");
-  }
+  const logs = await baseProvider.getLogs(filter);
+  return Array.isArray(logs) && logs.length > 0;
 }
 
 /* ---------- endpoints ---------- */
@@ -161,29 +147,16 @@ app.post("/attest", async (req, res) => {
     console.log("/attest request:", { wallet: walletAddr, token: tokenAddr, spender: spenderAddr });
 
     // 1) Neynar -> get FID
-    let user;
-    try {
-      user = await getFarcasterUser(walletAddr);
-    } catch (err) {
-      console.error("Neynar request failed:", err?.message || err);
-      return res.status(500).json({ error: "neynar lookup failed", details: err?.message || String(err) });
-    }
-
+    const user = await getFarcasterUser(walletAddr);
     if (!user || !user.fid) {
-      console.warn("Not a Farcaster user (neynar returned null or empty). neynarResponse:", !!user);
+      console.warn("Not a Farcaster user (neynar returned null or empty).");
       return res.status(403).json({ error: "not a Farcaster user" });
     }
     const fid = Number(user.fid);
-    console.log("Neynar user found:", { fid, username: user.username });
+    console.log("✅ Neynar user found:", { fid, username: user.username });
 
     // 2) Confirm revoke recorded on Base
-    let revoked;
-    try {
-      revoked = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
-    } catch (err) {
-      console.error("Log lookup failed:", err?.message || err);
-      return res.status(500).json({ error: "log lookup failed", details: err?.message || String(err) });
-    }
+    const revoked = await hasRevokedOnBase(walletAddr, tokenAddr, spenderAddr);
     if (!revoked) {
       console.warn("No revoke log found for", walletAddr);
       return res.status(400).json({ error: "no revoke recorded on base; call RevokeHelper.recordRevoked first" });
@@ -191,21 +164,13 @@ app.post("/attest", async (req, res) => {
 
     // 3) Build & sign EIP-712 attestation
     const nonce = BigInt(Date.now()).toString();
-    const deadline = Math.floor(Date.now() / 1000) + 10 * 60; // 10 minutes
+    const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
-    const value = {
-      wallet: walletAddr,
-      fid,
-      nonce,
-      deadline,
-      token: tokenAddr,
-      spender: spenderAddr,
-    };
+    const value = { wallet: walletAddr, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
 
-    // sign
     const sig = await attesterWallet._signTypedData(domain, ATTEST_TYPES, value);
 
-    console.log("Issuing attestation for fid", fid, "wallet", walletAddr);
+    console.log("✅ Issued attestation for fid", fid, "wallet", walletAddr);
     return res.json({ sig, nonce, deadline, fid, issuedBy: attesterWallet.address });
   } catch (err) {
     console.error("/attest error:", err?.message || err);
