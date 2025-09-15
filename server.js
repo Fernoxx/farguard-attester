@@ -47,7 +47,7 @@ const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
 /* ---------- Etherscan API integration ---------- */
 
-// Check if wallet has interacted with RevokeHelper using Etherscan API
+// Check if wallet has interacted with RevokeHelper using Etherscan API (Optimized)
 async function hasInteractedWithRevokeHelperEtherscan(wallet) {
   try {
     if (!ETHERSCAN_API_KEY) {
@@ -60,7 +60,40 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
     // Base chain Etherscan API
     const etherscanUrl = "https://api.basescan.org/api";
     
-    // Get transactions for the wallet to RevokeHelper contract
+    // Method 1: Try getLogs first (most efficient for recent blocks)
+    try {
+      const currentBlock = await getCurrentBlockNumber();
+      const fromBlock = Math.max(START_BLOCK, currentBlock - 10000); // Last 10k blocks
+      
+      const logsResponse = await fetch(
+        `${etherscanUrl}?module=logs&action=getLogs&address=${REVOKE_HELPER_ADDRESS}&fromBlock=${fromBlock}&toBlock=latest&apikey=${ETHERSCAN_API_KEY}`
+      );
+      
+      const logsData = await logsResponse.json();
+      
+      if (logsData.status === "1" && logsData.result.length > 0) {
+        // Check if any log's transaction was sent by our wallet
+        for (const log of logsData.result) {
+          try {
+            const txResponse = await fetch(
+              `${etherscanUrl}?module=proxy&action=eth_getTransactionByHash&txhash=${log.transactionHash}&apikey=${ETHERSCAN_API_KEY}`
+            );
+            const txData = await txResponse.json();
+            
+            if (txData.result && txData.result.from.toLowerCase() === wallet.toLowerCase()) {
+              console.log(`✅ Found RevokeHelper interaction via Etherscan logs`);
+              return true;
+            }
+          } catch (txErr) {
+            console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
+          }
+        }
+      }
+    } catch (logsErr) {
+      console.log(`⚠️ Logs method failed, trying txlist method: ${logsErr.message}`);
+    }
+    
+    // Method 2: Fallback to txlist (less efficient but more comprehensive)
     const response = await fetch(
       `${etherscanUrl}?module=account&action=txlist&address=${wallet}&startblock=${START_BLOCK}&endblock=99999999&page=1&offset=1000&sort=asc&apikey=${ETHERSCAN_API_KEY}`
     );
@@ -78,7 +111,7 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
     );
     
     if (hasInteraction) {
-      console.log(`✅ Found RevokeHelper interaction via Etherscan`);
+      console.log(`✅ Found RevokeHelper interaction via Etherscan txlist`);
       return true;
     } else {
       console.log(`❌ No RevokeHelper interaction found via Etherscan`);
@@ -88,6 +121,25 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
   } catch (err) {
     console.error("Etherscan check error:", err?.message || err);
     return true; // Allow if check fails
+  }
+}
+
+// Helper function to get current block number
+async function getCurrentBlockNumber() {
+  try {
+    if (!ETHERSCAN_API_KEY) return 99999999;
+    
+    const response = await fetch(
+      `https://api.basescan.org/api?module=proxy&action=eth_blockNumber&apikey=${ETHERSCAN_API_KEY}`
+    );
+    const data = await response.json();
+    
+    if (data.result) {
+      return parseInt(data.result, 16);
+    }
+    return 99999999;
+  } catch (err) {
+    return 99999999;
   }
 }
 
