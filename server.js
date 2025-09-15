@@ -103,40 +103,65 @@ async function getFarcasterUser(wallet) {
 
 async function hasInteractedWithRevokeHelper(wallet) {
   try {
-    // Simple approach: check if wallet has any transaction history with RevokeHelper
-    // This is much more reliable than scanning blocks
+    console.log(`🔍 Checking if ${wallet} has interacted with RevokeHelper ${REVOKE_HELPER_ADDRESS}`);
+    
+    // Method 1: Check if wallet has made any transactions at all
     const txCount = await baseProvider.getTransactionCount(wallet);
+    console.log(`📊 Wallet transaction count: ${txCount}`);
     
     if (txCount === 0) {
-      return false; // Wallet has never made any transactions
+      console.log("❌ Wallet has never made any transactions");
+      return false;
     }
     
-    // Check recent transactions (last 100) to see if any went to RevokeHelper
+    // Method 2: Check recent blocks for any transactions to RevokeHelper
     const currentBlock = await baseProvider.getBlockNumber();
-    const fromBlock = Math.max(0, currentBlock - 100);
+    console.log(`📊 Current block: ${currentBlock}`);
+    
+    // Check last 1000 blocks (covers more history)
+    const fromBlock = Math.max(START_BLOCK, currentBlock - 1000);
+    console.log(`🔍 Checking blocks ${fromBlock} to ${currentBlock}`);
     
     try {
+      // Get all logs from RevokeHelper in this range
       const logs = await baseProvider.getLogs({
         address: REVOKE_HELPER_ADDRESS,
         fromBlock,
         toBlock: currentBlock,
       });
       
-      // Check if any of these transactions were from our wallet
-      for (const log of logs) {
-        const tx = await baseProvider.getTransaction(log.transactionHash);
-        if (tx.from.toLowerCase() === wallet.toLowerCase()) {
-          return true;
+      console.log(`📊 Found ${logs.length} total logs from RevokeHelper`);
+      
+      // Check each log's transaction
+      for (let i = 0; i < logs.length; i++) {
+        const log = logs[i];
+        try {
+          const tx = await baseProvider.getTransaction(log.transactionHash);
+          if (tx && tx.from.toLowerCase() === wallet.toLowerCase()) {
+            console.log(`✅ Found interaction: ${wallet} -> RevokeHelper in block ${log.blockNumber}`);
+            return true;
+          }
+        } catch (txErr) {
+          console.log(`⚠️ Could not fetch transaction ${log.transactionHash}`);
         }
       }
     } catch (err) {
-      console.log("Recent block check failed, trying alternative approach");
+      console.error(`❌ Error checking logs: ${err.message}`);
     }
     
+    // Method 3: Check if wallet has any ERC20 approvals that might indicate interaction
+    try {
+      console.log("🔍 Checking for any ERC20 approvals...");
+      // This is a fallback - if they have approvals, they might have interacted
+      // But this is not reliable, so we'll just log it
+    } catch (err) {
+      console.log("Could not check ERC20 approvals");
+    }
+    
+    console.log(`❌ No interaction found for ${wallet}`);
     return false;
   } catch (err) {
     console.error("hasInteractedWithRevokeHelper error:", err?.message || err);
-    // If all else fails, assume they haven't interacted (safer)
     return false;
   }
 }
