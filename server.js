@@ -40,7 +40,7 @@ console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
 console.log("✅ Start block:", START_BLOCK);
 console.log("✅ Anti-farming enabled: FID age + social activity checks");
-console.log("✅ Etherscan API:", ETHERSCAN_API_KEY ? "Available" : "Not configured");
+console.log("✅ Etherscan V2 API:", ETHERSCAN_API_KEY ? "Available" : "Not configured");
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
@@ -57,8 +57,9 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
     
     console.log(`🔍 Checking ${wallet} interactions with RevokeHelper via Etherscan`);
     
-    // Base chain Etherscan API
-    const etherscanUrl = "https://api.basescan.org/api";
+    // Etherscan V2 API for Base chain (chainid=8453)
+    const etherscanV2Url = "https://api.etherscan.io/v2/api";
+    const baseChainId = 8453;
     
     // Method 1: Try getLogs first (most efficient for recent blocks)
     try {
@@ -66,7 +67,7 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
       const fromBlock = Math.max(START_BLOCK, currentBlock - 10000); // Last 10k blocks
       
       const logsResponse = await fetch(
-        `${etherscanUrl}?module=logs&action=getLogs&address=${REVOKE_HELPER_ADDRESS}&fromBlock=${fromBlock}&toBlock=latest&apikey=${ETHERSCAN_API_KEY}`
+        `${etherscanV2Url}?chainid=${baseChainId}&module=logs&action=getLogs&address=${REVOKE_HELPER_ADDRESS}&fromBlock=${fromBlock}&toBlock=latest&apikey=${ETHERSCAN_API_KEY}`
       );
       
       const logsData = await logsResponse.json();
@@ -76,7 +77,7 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
         for (const log of logsData.result) {
           try {
             const txResponse = await fetch(
-              `${etherscanUrl}?module=proxy&action=eth_getTransactionByHash&txhash=${log.transactionHash}&apikey=${ETHERSCAN_API_KEY}`
+              `${etherscanV2Url}?chainid=${baseChainId}&module=proxy&action=eth_getTransactionByHash&txhash=${log.transactionHash}&apikey=${ETHERSCAN_API_KEY}`
             );
             const txData = await txResponse.json();
             
@@ -95,7 +96,7 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
     
     // Method 2: Fallback to txlist (less efficient but more comprehensive)
     const response = await fetch(
-      `${etherscanUrl}?module=account&action=txlist&address=${wallet}&startblock=${START_BLOCK}&endblock=99999999&page=1&offset=1000&sort=asc&apikey=${ETHERSCAN_API_KEY}`
+      `${etherscanV2Url}?chainid=${baseChainId}&module=account&action=txlist&address=${wallet}&startblock=${START_BLOCK}&endblock=99999999&page=1&offset=1000&sort=asc&apikey=${ETHERSCAN_API_KEY}`
     );
     
     const data = await response.json();
@@ -124,13 +125,13 @@ async function hasInteractedWithRevokeHelperEtherscan(wallet) {
   }
 }
 
-// Helper function to get current block number
+// Helper function to get current block number using V2 API
 async function getCurrentBlockNumber() {
   try {
     if (!ETHERSCAN_API_KEY) return 99999999;
     
     const response = await fetch(
-      `https://api.basescan.org/api?module=proxy&action=eth_blockNumber&apikey=${ETHERSCAN_API_KEY}`
+      `https://api.etherscan.io/v2/api?chainid=8453&module=proxy&action=eth_blockNumber&apikey=${ETHERSCAN_API_KEY}`
     );
     const data = await response.json();
     
@@ -332,7 +333,7 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
         revokeHelperInteraction: {
           hasInteracted: hasRevokeHelperInteraction,
           contractAddress: REVOKE_HELPER_ADDRESS,
-          checkedVia: ETHERSCAN_API_KEY ? "Etherscan API" : "Not configured"
+          checkedVia: ETHERSCAN_API_KEY ? "Etherscan V2 API" : "Not configured"
         }
       },
       requirements: {
