@@ -61,24 +61,28 @@ app.use(rateLimit({ windowMs: 60_000, max: 60, message: { error: "Too many reque
 
 /* ---------- helpers ---------- */
 
-// 1. Check Neynar for FID
+// check if wallet is Farcaster user via Neynar
 async function getFarcasterUser(wallet) {
-  const url = `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses[]=${wallet}`;
-  const resp = await fetch(url, {
-    headers: {
-      "x-api-key": NEYNAR_API_KEY,
-      "accept": "application/json",
-      "x-neynar-experimental": "false"
+  const resp = await fetch(
+    `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses=${wallet}`,
+    {
+      method: "GET",
+      headers: {
+        "x-api-key": process.env.NEYNAR_API_KEY,
+        "accept": "application/json",
+      },
     }
-  });
+  );
 
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Neynar API error: ${resp.status} ${text}`);
+    throw new Error(`Neynar API failed: ${resp.status}`);
   }
 
   const data = await resp.json();
-  return data?.users?.[0] || null;
+  if (data.users && data.users.length > 0) {
+    return data.users[0]; // first match
+  }
+  return null;
 }
 
 // 2. Check if revoked logged
