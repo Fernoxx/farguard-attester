@@ -15,38 +15,84 @@ const {
   ATTESTER_PK,
   VERIFYING_CONTRACT,
   REVOKE_HELPER_ADDRESS,
-  BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
   DEPLOY_BLOCK, // 👈 new
-  PORT: PORT_ENV
+  PORT: PORT_ENV,
+  // Optional: Etherscan API for interaction checking
+  ETHERSCAN_API_KEY
 } = process.env;
 
 const PORT = Number(PORT_ENV || 8080);
 const CHAIN_ID = Number(CHAIN_ID_ENV || 8453);
 const START_BLOCK = Number(DEPLOY_BLOCK || 0); // fallback to 0 if not set
 
-if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !BASE_RPC || !NEYNAR_API_KEY) {
-  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, BASE_RPC, NEYNAR_API_KEY, DEPLOY_BLOCK");
+if (!ATTESTER_PK || !VERIFYING_CONTRACT || !REVOKE_HELPER_ADDRESS || !NEYNAR_API_KEY) {
+  console.error("❌ Missing required env vars. Set ATTESTER_PK, VERIFYING_CONTRACT, REVOKE_HELPER_ADDRESS, NEYNAR_API_KEY, DEPLOY_BLOCK");
   process.exit(1);
 }
 
 /* ---------- providers & signer ---------- */
-const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeHelper address:", REVOKE_HELPER_ADDRESS);
-console.log("✅ Base RPC:", BASE_RPC);
 console.log("✅ Start block:", START_BLOCK);
 console.log("✅ Anti-farming enabled: FID age + social activity checks");
+console.log("✅ Etherscan API:", ETHERSCAN_API_KEY ? "Available" : "Not configured");
 
 /* ---------- constants ---------- */
 const REVOKE_EVENT_TOPIC = ethers.id("Revoked(address,address,address)");
 
+/* ---------- Etherscan API integration ---------- */
+
+// Check if wallet has interacted with RevokeHelper using Etherscan API
+async function hasInteractedWithRevokeHelperEtherscan(wallet) {
+  try {
+    if (!ETHERSCAN_API_KEY) {
+      console.log("⚠️ Etherscan API not configured - skipping interaction check");
+      return true; // Allow if no Etherscan API
+    }
+    
+    console.log(`🔍 Checking ${wallet} interactions with RevokeHelper via Etherscan`);
+    
+    // Base chain Etherscan API
+    const etherscanUrl = "https://api.basescan.org/api";
+    
+    // Get transactions for the wallet to RevokeHelper contract
+    const response = await fetch(
+      `${etherscanUrl}?module=account&action=txlist&address=${wallet}&startblock=${START_BLOCK}&endblock=99999999&page=1&offset=1000&sort=asc&apikey=${ETHERSCAN_API_KEY}`
+    );
+    
+    const data = await response.json();
+    
+    if (data.status !== "1") {
+      console.log(`⚠️ Etherscan API error: ${data.message}`);
+      return true; // Allow if API fails
+    }
+    
+    // Check if any transaction is to RevokeHelper contract
+    const hasInteraction = data.result.some(tx => 
+      tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()
+    );
+    
+    if (hasInteraction) {
+      console.log(`✅ Found RevokeHelper interaction via Etherscan`);
+      return true;
+    } else {
+      console.log(`❌ No RevokeHelper interaction found via Etherscan`);
+      return false;
+    }
+    
+  } catch (err) {
+    console.error("Etherscan check error:", err?.message || err);
+    return true; // Allow if check fails
+  }
+}
+
 /* ---------- simple setup ---------- */
-// Anti-farming checks using Farcaster data only
+// Anti-farming checks using Farcaster data + optional Etherscan
 
 const NAME = "RevokeAndClaim";
 const VERSION = "1";
@@ -204,7 +250,10 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
     const hasMinimumActivity = user.follower_count >= 10 || user.following_count >= 20 || user.cast_count >= 5;
     const hasVerifiedAddresses = user.verified_addresses && user.verified_addresses.length > 0;
     
-    const eligible = daysSinceCreation >= 30 && hasMinimumActivity;
+    // Check RevokeHelper interaction
+    const hasRevokeHelperInteraction = await hasInteractedWithRevokeHelperEtherscan(walletAddr);
+    
+    const eligible = daysSinceCreation >= 30 && hasMinimumActivity && hasRevokeHelperInteraction;
     
     return res.json({
       wallet: walletAddr,
@@ -227,11 +276,17 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
         verifiedAddresses: {
           count: user.verified_addresses?.length || 0,
           hasVerified: hasVerifiedAddresses
+        },
+        revokeHelperInteraction: {
+          hasInteracted: hasRevokeHelperInteraction,
+          contractAddress: REVOKE_HELPER_ADDRESS,
+          checkedVia: ETHERSCAN_API_KEY ? "Etherscan API" : "Not configured"
         }
       },
       requirements: {
         accountAge: "30+ days",
         socialActivity: "10+ followers OR 20+ following OR 5+ casts",
+        revokeHelperInteraction: "Must interact with RevokeHelper contract",
         verifiedAddresses: "preferred but not required"
       }
     });
@@ -266,7 +321,7 @@ app.post("/attest", async (req, res) => {
     const walletToCheck = walletAddr;
     console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
 
-    // Simple anti-farming check: Is this a legitimate Farcaster user?
+    // Anti-farming check: Is this a legitimate Farcaster user?
     console.log("🔍 Anti-farming verification...");
     
     try {
@@ -288,6 +343,26 @@ app.post("/attest", async (req, res) => {
     } catch (err) {
       console.error("Error checking anti-farming:", err);
       return res.status(500).json({ error: "failed to verify user legitimacy" });
+    }
+    
+    // Optional: Check if user has interacted with RevokeHelper via Etherscan
+    console.log("🔍 Checking RevokeHelper interaction...");
+    
+    try {
+      const hasInteracted = await hasInteractedWithRevokeHelperEtherscan(walletToCheck);
+      
+      if (!hasInteracted) {
+        return res.status(400).json({ 
+          error: "Must interact with RevokeHelper first",
+          details: "Please revoke some allowances using RevokeHelper before claiming rewards",
+          revokeHelperAddress: REVOKE_HELPER_ADDRESS
+        });
+      }
+      
+      console.log("✅ User has interacted with RevokeHelper");
+    } catch (err) {
+      console.error("Error checking RevokeHelper interaction:", err);
+      return res.status(500).json({ error: "failed to verify RevokeHelper interaction" });
     }
 
     const nonce = BigInt(Date.now()).toString();
