@@ -90,14 +90,12 @@ app.use(
  */
 async function getFarcasterUser(wallet) {
   try {
-    const url = `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses=${encodeURIComponent(
-      wallet
-    )}`;
+    const url = `https://api.neynar.com/v2/farcaster/user/bulk-by-address/?addresses=${encodeURIComponent(wallet)}`;
     const res = await fetch(url, {
       method: "GET",
       headers: {
         "x-api-key": NEYNAR_API_KEY,
-        accept: "application/json",
+        "accept": "application/json",
         "x-neynar-experimental": "false",
       },
       timeout: 15000,
@@ -105,19 +103,24 @@ async function getFarcasterUser(wallet) {
 
     const text = await res.text();
     let data;
-    try {
-      data = JSON.parse(text);
+    try { 
+      data = JSON.parse(text); 
     } catch (e) {
-      console.warn("⚠️ Neynar returned non-json:", text.slice(0, 200));
+      console.warn("Neynar returned non-JSON:", text.slice(0, 200));
       return null;
     }
 
     console.log("🔄 Neynar raw response:", data);
 
-    // ✅ As per docs, `data.users` is always an array
-    if (Array.isArray(data.users) && data.users.length > 0) {
-      return data.users[0]; // take first user
+    // ✅ Handle keyed by lowercase wallet
+    const key = wallet.toLowerCase();
+    if (data[key] && Array.isArray(data[key]) && data[key].length > 0) {
+      return data[key][0]; // first user object
     }
+
+    // old fallback shapes
+    if (Array.isArray(data.users) && data.users.length > 0) return data.users[0];
+    if (data.result?.user) return data.result.user;
 
     return null;
   } catch (err) {
@@ -125,7 +128,6 @@ async function getFarcasterUser(wallet) {
     throw new Error("neynar lookup failed");
   }
 }
-
 /**
  * Check if RevokeHelper emitted Revoked(wallet, token, spender) on Base.
  * Returns boolean.
