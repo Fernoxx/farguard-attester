@@ -58,20 +58,28 @@ async function hasInteractedWithRevokeHelper(wallet) {
       return false;
     }
     
-    // Check user's last 20 transactions to see if any go to RevokeHelper
+    // Check user's recent transactions to see if any go to RevokeHelper
     console.log("🔍 Checking user's recent transactions for RevokeHelper interactions");
+    console.log(`🔍 RevokeHelper address: ${REVOKE_HELPER_ADDRESS}`);
     
     try {
-      // Check the last 20 transactions (most users who interact with RevokeHelper will have done so recently)
-      for (let i = Math.max(0, txCount - 20); i < txCount; i++) {
+      // Check the last 100 transactions (increase from 20 to catch more interactions)
+      const transactionsToCheck = Math.min(100, txCount);
+      console.log(`🔍 Checking last ${transactionsToCheck} transactions out of ${txCount} total`);
+      
+      for (let i = Math.max(0, txCount - transactionsToCheck); i < txCount; i++) {
         try {
           const tx = await baseProvider.getTransaction(wallet, i);
-          if (tx && tx.to && tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
-            console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
-            return true;
+          if (tx && tx.to) {
+            console.log(`🔍 Transaction ${i}: ${tx.from} -> ${tx.to}`);
+            if (tx.to.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase()) {
+              console.log(`✅ Found RevokeHelper interaction in transaction ${i}`);
+              console.log(`✅ Transaction hash: ${tx.hash}`);
+              return true;
+            }
           }
         } catch (txErr) {
-          // Skip failed transactions
+          console.log(`⚠️ Could not fetch transaction ${i}: ${txErr.message}`);
           continue;
         }
       }
