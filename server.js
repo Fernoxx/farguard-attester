@@ -214,11 +214,24 @@ app.post("/attest", async (req, res) => {
     const sig = await attesterWallet.signTypedData(domain, ATTEST_TYPES, value);
     console.log("✅ Attestation signed successfully");
 
-    return res.json({ sig, nonce, deadline, fid, issuedBy: attesterWallet.address });
+    const response = { sig, nonce, deadline, fid, issuedBy: attesterWallet.address };
+    console.log("📤 Sending response:", response);
+    
+    // Add CORS headers
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    
+    return res.json(response);
   } catch (err) {
     console.error("/attest error:", err?.message || err);
     return res.status(500).json({ error: "internal error", details: err?.message || String(err) });
   }
+});
+
+// Simple test endpoint
+app.get("/test", (req, res) => {
+  res.json({ status: "ok", message: "Server is working", timestamp: new Date().toISOString() });
 });
 
 // Debug endpoint to check what's happening
