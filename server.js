@@ -234,6 +234,73 @@ app.get("/test", (req, res) => {
   res.json({ status: "ok", message: "Server is working", timestamp: new Date().toISOString() });
 });
 
+// Check RevokeAndClaim contract configuration
+app.get("/check-revoke-and-claim/:wallet/:token/:spender", async (req, res) => {
+  try {
+    const { wallet, token, spender } = req.params;
+    
+    if (!ethers.isAddress(wallet) || !ethers.isAddress(token) || !ethers.isAddress(spender)) {
+      return res.status(400).json({ error: "Invalid addresses" });
+    }
+    
+    const REVOKE_AND_CLAIM_ADDRESS = "0x547541959d2f7dba7dad4cac7f366c25400a49bc";
+    const REVOKE_HELPER_ADDRESS = "0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf";
+    
+    console.log("🔍 Checking RevokeAndClaim contract...");
+    console.log("RevokeAndClaim address:", REVOKE_AND_CLAIM_ADDRESS);
+    console.log("RevokeHelper address:", REVOKE_HELPER_ADDRESS);
+    
+    try {
+      // Check if RevokeAndClaim contract exists
+      const code = await baseProvider.getCode(REVOKE_AND_CLAIM_ADDRESS);
+      if (code === "0x") {
+        return res.json({
+          error: "No contract found at RevokeAndClaim address",
+          revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS
+        });
+      }
+      
+      // Try to call revokeHelper function to see what address it's using
+      const revokeAndClaimABI = [
+        "function revokeHelper() external view returns (address)"
+      ];
+      
+      const revokeAndClaim = new ethers.Contract(REVOKE_AND_CLAIM_ADDRESS, revokeAndClaimABI, baseProvider);
+      const configuredRevokeHelper = await revokeAndClaim.revokeHelper();
+      
+      console.log("✅ RevokeAndClaim contract found");
+      console.log("✅ Configured RevokeHelper address:", configuredRevokeHelper);
+      
+      // Check if the configured RevokeHelper matches
+      const helperMatches = configuredRevokeHelper.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase();
+      
+      return res.json({
+        revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS,
+        configuredRevokeHelper: configuredRevokeHelper,
+        expectedRevokeHelper: REVOKE_HELPER_ADDRESS,
+        helperMatches: helperMatches,
+        status: helperMatches ? "✅ Configuration correct" : "❌ Wrong RevokeHelper address",
+        user: wallet,
+        token: token,
+        spender: spender
+      });
+      
+    } catch (error) {
+      console.log("❌ Error checking RevokeAndClaim:", error.message);
+      
+      return res.json({
+        error: "Failed to check RevokeAndClaim contract",
+        revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS,
+        functionError: error.message
+      });
+    }
+    
+  } catch (error) {
+    console.error("Check RevokeAndClaim error:", error);
+    return res.status(500).json({ error: "Failed to check RevokeAndClaim", details: error.message });
+  }
+});
+
 // Check RevokeHelper contract
 app.get("/check-revoke-helper/:wallet/:token/:spender", async (req, res) => {
   try {
