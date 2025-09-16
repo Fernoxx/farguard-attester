@@ -234,6 +234,69 @@ app.get("/test", (req, res) => {
   res.json({ status: "ok", message: "Server is working", timestamp: new Date().toISOString() });
 });
 
+// Check RevokeHelper contract
+app.get("/check-revoke-helper/:wallet/:token/:spender", async (req, res) => {
+  try {
+    const { wallet, token, spender } = req.params;
+    
+    if (!ethers.isAddress(wallet) || !ethers.isAddress(token) || !ethers.isAddress(spender)) {
+      return res.status(400).json({ error: "Invalid addresses" });
+    }
+    
+    const REVOKE_HELPER_ADDRESS = "0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf";
+    
+    console.log("🔍 Checking RevokeHelper contract...");
+    console.log("RevokeHelper address:", REVOKE_HELPER_ADDRESS);
+    console.log("User wallet:", wallet);
+    console.log("Token:", token);
+    console.log("Spender:", spender);
+    
+    // Try to call hasRevoked function
+    try {
+      const hasRevokedABI = [
+        "function hasRevoked(address user, address token, address spender) external view returns (bool)"
+      ];
+      
+      const revokeHelper = new ethers.Contract(REVOKE_HELPER_ADDRESS, hasRevokedABI, baseProvider);
+      const hasRevoked = await revokeHelper.hasRevoked(wallet, token, spender);
+      
+      console.log("✅ hasRevoked result:", hasRevoked);
+      
+      return res.json({
+        revokeHelperAddress: REVOKE_HELPER_ADDRESS,
+        user: wallet,
+        token: token,
+        spender: spender,
+        hasRevoked: hasRevoked,
+        status: hasRevoked ? "User has revoked" : "User has NOT revoked"
+      });
+      
+    } catch (error) {
+      console.log("❌ Error calling hasRevoked:", error.message);
+      
+      // Try to get contract code to see what functions are available
+      const code = await baseProvider.getCode(REVOKE_HELPER_ADDRESS);
+      if (code === "0x") {
+        return res.json({
+          error: "No contract found at RevokeHelper address",
+          revokeHelperAddress: REVOKE_HELPER_ADDRESS
+        });
+      } else {
+        return res.json({
+          error: "Contract exists but hasRevoked function failed",
+          revokeHelperAddress: REVOKE_HELPER_ADDRESS,
+          contractCodeLength: code.length,
+          functionError: error.message
+        });
+      }
+    }
+    
+  } catch (error) {
+    console.error("Check RevokeHelper error:", error);
+    return res.status(500).json({ error: "Failed to check RevokeHelper", details: error.message });
+  }
+});
+
 // Debug endpoint to check what's happening
 app.get("/debug/:wallet", async (req, res) => {
   try {
