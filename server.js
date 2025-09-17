@@ -1,4 +1,4 @@
-// server.js — FarGuard Attester (Neynar + Base + RevokeHelper)
+// server.js — FarGuard Attester (Neynar + Base + RevokeHelper + Supabase)
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -6,7 +6,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import fetch from "node-fetch";
 import { ethers } from "ethers";
-// Removed Supabase - using simple anti-farming instead
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
@@ -17,6 +17,8 @@ const {
   BASE_RPC,
   CHAIN_ID: CHAIN_ID_ENV,
   NEYNAR_API_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY,
   PORT: PORT_ENV
 } = process.env;
 
@@ -28,16 +30,24 @@ if (!ATTESTER_PK || !VERIFYING_CONTRACT || !BASE_RPC || !NEYNAR_API_KEY) {
   process.exit(1);
 }
 
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  console.error("❌ Missing Supabase env vars. Set SUPABASE_URL, SUPABASE_SERVICE_KEY");
+  process.exit(1);
+}
+
 /* ---------- providers & signer ---------- */
 const baseProvider = new ethers.JsonRpcProvider(BASE_RPC, { name: "base", chainId: CHAIN_ID });
 const attesterWallet = new ethers.Wallet(ATTESTER_PK);
+
+// Initialize Supabase client
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 console.log("✅ Attester address:", attesterWallet.address);
 console.log("✅ Verifying contract:", VERIFYING_CONTRACT);
 console.log("✅ RevokeAndClaim contract:", VERIFYING_CONTRACT);
 console.log("✅ Base RPC:", BASE_RPC);
-console.log("✅ No anti-farming restrictions: All Farcaster users allowed");
-
+console.log("✅ Supabase connected:", !!supabase);
+console.log("✅ Revocation verification: Database + RevokeHelper required");
 
 /* ---------- simple setup ---------- */
 
@@ -53,6 +63,7 @@ const ATTEST_TYPES = {
     { name: "spender", type: "address" },
   ],
 };
+
 function buildDomain() {
   return {
     name: NAME,
@@ -87,17 +98,12 @@ async function getFarcasterUser(wallet) {
     const data = await res.json();
     const entries = data[wallet.toLowerCase()];
     if (Array.isArray(entries) && entries.length > 0) {
-      // Get the user data from the first entry (they all have the same FID)
       const userData = entries[0];
-      
-      // The provided wallet IS the user's selected primary wallet
-      // We don't need to fetch the custody address - the user has already selected
-      // which wallet they want to use as their primary wallet
       console.log(`✅ Using user-selected primary wallet: ${wallet} for FID ${userData.fid}`);
       
       return {
         ...userData,
-        primary_wallet: wallet  // The provided wallet is the user's selected primary wallet
+        primary_wallet: wallet
       };
     }
     return null;
@@ -107,17 +113,60 @@ async function getFarcasterUser(wallet) {
   }
 }
 
+// Check if user has revoked using RevokeHelper (from database)
+async function checkRevocationInDB(wallet, token, spender) {
+  try {
+    console.log(`🔍 Checking revocation in database for: ${wallet}, ${token}, ${spender}`);
+    
+    const { data, error } = await supabase
+      .from('revocations')
+      .select('*')
+      .eq('wallet', wallet.toLowerCase())
+      .eq('token', token.toLowerCase())
+      .eq('spender', spender.toLowerCase())
+      .single();
+    
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
+      console.error('Database error:', error);
+      return { hasRevoked: false, error: 'Database error' };
+    }
+    
+    const hasRevoked = !!data;
+    console.log(`✅ Database check result: ${hasRevoked ? 'HAS REVOKED' : 'HAS NOT REVOKED'}`);
+    
+    return { hasRevoked, data };
+  } catch (error) {
+    console.error('Error checking revocation in database:', error);
+    return { hasRevoked: false, error: error.message };
+  }
+}
 
-// Anti-farming checks removed - allow all Farcaster users
-
-// Simple anti-farming system - no blockchain checking needed!
+// Optional: Check RevokeHelper contract directly (as backup)
+async function checkRevocationOnChain(wallet, token, spender) {
+  try {
+    const REVOKE_HELPER_ADDRESS = "0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf";
+    const hasRevokedABI = [
+      "function hasRevoked(address user, address token, address spender) external view returns (bool)"
+    ];
+    
+    const revokeHelper = new ethers.Contract(REVOKE_HELPER_ADDRESS, hasRevokedABI, baseProvider);
+    const hasRevoked = await revokeHelper.hasRevoked(wallet, token, spender);
+    
+    console.log(`🔗 On-chain check result: ${hasRevoked ? 'HAS REVOKED' : 'HAS NOT REVOKED'}`);
+    return { hasRevoked, source: 'on-chain' };
+  } catch (error) {
+    console.error('Error checking revocation on-chain:', error);
+    return { hasRevoked: false, error: error.message, source: 'on-chain' };
+  }
+}
 
 /* ---------- endpoints ---------- */
 app.get("/health", (req, res) => {
   return res.json({ 
     ok: true, 
     attester: attesterWallet.address,
-    message: "Farcaster attestation service - RevokeHelper interaction required"
+    supabase: !!supabase,
+    message: "Farcaster attestation service - RevokeHelper + Database verification required"
   });
 });
 
@@ -141,14 +190,11 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
     
     const fid = Number(user.fid);
     
-    // All Farcaster users verified by Neynar are eligible
-    const eligible = true;
-    
     return res.json({
       wallet: walletAddr,
       fid: user.fid,
       username: user.username,
-      eligible,
+      eligible: true,
       details: {
         farcasterUser: {
           isFarcasterUser: true,
@@ -158,7 +204,7 @@ app.get("/check-eligibility/:wallet", async (req, res) => {
       },
       requirements: {
         farcasterAccount: "Must have a valid Farcaster account",
-        directClaiming: "Can claim rewards directly from RevokeAndClaim contract"
+        revocationRequired: "Must revoke using RevokeHelper before claiming"
       }
     });
   } catch (err) {
@@ -179,8 +225,8 @@ app.post("/attest", async (req, res) => {
     const spenderAddr = ethers.getAddress(spender);
 
     console.log("/attest request:", { wallet: walletAddr, token: tokenAddr, spender: spenderAddr });
-    console.log("🔍 Request body:", req.body);
 
+    // Step 1: Verify Farcaster user
     const user = await getFarcasterUser(walletAddr);
     if (!user || !user.fid) {
       console.warn("❌ Not a Farcaster user");
@@ -189,28 +235,28 @@ app.post("/attest", async (req, res) => {
     const fid = Number(user.fid);
     console.log("✅ Neynar user found:", { fid, username: user.username });
 
-    console.log(`✅ FID ${fid} verified by Neynar API - can claim rewards`);
-
-    // Use the provided wallet (which is the user's selected primary wallet)
-    const walletToCheck = walletAddr;
-    console.log(`✅ Using user-selected primary wallet for interaction check: ${walletToCheck}`);
-
-    // No anti-farming checks - allow all Farcaster users
-    console.log("✅ Allowing all Farcaster users - no anti-farming restrictions");
+    // Step 2: Check if user has revoked using RevokeHelper
+    console.log("🔍 Checking if user has revoked using RevokeHelper...");
+    const dbCheck = await checkRevocationInDB(walletAddr, tokenAddr, spenderAddr);
     
-    console.log("✅ All Farcaster users can claim rewards directly from RevokeAndClaim contract");
+    if (!dbCheck.hasRevoked) {
+      console.warn("❌ User has not revoked using RevokeHelper");
+      return res.status(403).json({ 
+        error: "User must revoke using RevokeHelper before claiming",
+        details: "No revocation found in database for this wallet/token/spender combination"
+      });
+    }
+    
+    console.log("✅ User has revoked using RevokeHelper - proceeding with attestation");
 
+    // Step 3: Generate attestation
     const nonce = BigInt(Date.now()).toString();
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
-    // Use the provided wallet (which is the user's selected primary wallet) for attestation
     const attestationWallet = walletAddr;
-    console.log(`✅ Using user-selected primary wallet for attestation: ${attestationWallet}`);
     const value = { wallet: attestationWallet, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
 
     console.log("🔍 Signing attestation with values:", value);
-    console.log("🔍 Domain:", domain);
-    
     const sig = await attesterWallet.signTypedData(domain, ATTEST_TYPES, value);
     console.log("✅ Attestation signed successfully");
 
@@ -229,139 +275,52 @@ app.post("/attest", async (req, res) => {
   }
 });
 
+// Check specific revocation status
+app.get("/check-revocation/:wallet/:token/:spender", async (req, res) => {
+  try {
+    const { wallet, token, spender } = req.params;
+    
+    if (!ethers.isAddress(wallet) || !ethers.isAddress(token) || !ethers.isAddress(spender)) {
+      return res.status(400).json({ error: "Invalid addresses" });
+    }
+    
+    const walletAddr = ethers.getAddress(wallet);
+    const tokenAddr = ethers.getAddress(token);
+    const spenderAddr = ethers.getAddress(spender);
+    
+    console.log("🔍 Checking revocation status...");
+    
+    // Check database
+    const dbCheck = await checkRevocationInDB(walletAddr, tokenAddr, spenderAddr);
+    
+    // Optional: Check on-chain as backup
+    const onChainCheck = await checkRevocationOnChain(walletAddr, tokenAddr, spenderAddr);
+    
+    return res.json({
+      wallet: walletAddr,
+      token: tokenAddr,
+      spender: spenderAddr,
+      database: {
+        hasRevoked: dbCheck.hasRevoked,
+        data: dbCheck.data,
+        error: dbCheck.error
+      },
+      onChain: {
+        hasRevoked: onChainCheck.hasRevoked,
+        error: onChainCheck.error
+      },
+      status: dbCheck.hasRevoked ? "✅ Can claim" : "❌ Must revoke first"
+    });
+    
+  } catch (error) {
+    console.error("Check revocation error:", error);
+    return res.status(500).json({ error: "Failed to check revocation", details: error.message });
+  }
+});
+
 // Simple test endpoint
 app.get("/test", (req, res) => {
   res.json({ status: "ok", message: "Server is working", timestamp: new Date().toISOString() });
-});
-
-// Check RevokeAndClaim contract configuration
-app.get("/check-revoke-and-claim/:wallet/:token/:spender", async (req, res) => {
-  try {
-    const { wallet, token, spender } = req.params;
-    
-    if (!ethers.isAddress(wallet) || !ethers.isAddress(token) || !ethers.isAddress(spender)) {
-      return res.status(400).json({ error: "Invalid addresses" });
-    }
-    
-    const REVOKE_AND_CLAIM_ADDRESS = "0x547541959d2f7dba7dad4cac7f366c25400a49bc";
-    const REVOKE_HELPER_ADDRESS = "0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf";
-    
-    console.log("🔍 Checking RevokeAndClaim contract...");
-    console.log("RevokeAndClaim address:", REVOKE_AND_CLAIM_ADDRESS);
-    console.log("RevokeHelper address:", REVOKE_HELPER_ADDRESS);
-    
-    try {
-      // Check if RevokeAndClaim contract exists
-      const code = await baseProvider.getCode(REVOKE_AND_CLAIM_ADDRESS);
-      if (code === "0x") {
-        return res.json({
-          error: "No contract found at RevokeAndClaim address",
-          revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS
-        });
-      }
-      
-      // Try to call revokeHelper function to see what address it's using
-      const revokeAndClaimABI = [
-        "function revokeHelper() external view returns (address)"
-      ];
-      
-      const revokeAndClaim = new ethers.Contract(REVOKE_AND_CLAIM_ADDRESS, revokeAndClaimABI, baseProvider);
-      const configuredRevokeHelper = await revokeAndClaim.revokeHelper();
-      
-      console.log("✅ RevokeAndClaim contract found");
-      console.log("✅ Configured RevokeHelper address:", configuredRevokeHelper);
-      
-      // Check if the configured RevokeHelper matches
-      const helperMatches = configuredRevokeHelper.toLowerCase() === REVOKE_HELPER_ADDRESS.toLowerCase();
-      
-      return res.json({
-        revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS,
-        configuredRevokeHelper: configuredRevokeHelper,
-        expectedRevokeHelper: REVOKE_HELPER_ADDRESS,
-        helperMatches: helperMatches,
-        status: helperMatches ? "✅ Configuration correct" : "❌ Wrong RevokeHelper address",
-        user: wallet,
-        token: token,
-        spender: spender
-      });
-      
-    } catch (error) {
-      console.log("❌ Error checking RevokeAndClaim:", error.message);
-      
-      return res.json({
-        error: "Failed to check RevokeAndClaim contract",
-        revokeAndClaimAddress: REVOKE_AND_CLAIM_ADDRESS,
-        functionError: error.message
-      });
-    }
-    
-  } catch (error) {
-    console.error("Check RevokeAndClaim error:", error);
-    return res.status(500).json({ error: "Failed to check RevokeAndClaim", details: error.message });
-  }
-});
-
-// Check RevokeHelper contract
-app.get("/check-revoke-helper/:wallet/:token/:spender", async (req, res) => {
-  try {
-    const { wallet, token, spender } = req.params;
-    
-    if (!ethers.isAddress(wallet) || !ethers.isAddress(token) || !ethers.isAddress(spender)) {
-      return res.status(400).json({ error: "Invalid addresses" });
-    }
-    
-    const REVOKE_HELPER_ADDRESS = "0x3acb4672fec377bd62cf4d9a0e6bdf5f10e5caaf";
-    
-    console.log("🔍 Checking RevokeHelper contract...");
-    console.log("RevokeHelper address:", REVOKE_HELPER_ADDRESS);
-    console.log("User wallet:", wallet);
-    console.log("Token:", token);
-    console.log("Spender:", spender);
-    
-    // Try to call hasRevoked function
-    try {
-      const hasRevokedABI = [
-        "function hasRevoked(address user, address token, address spender) external view returns (bool)"
-      ];
-      
-      const revokeHelper = new ethers.Contract(REVOKE_HELPER_ADDRESS, hasRevokedABI, baseProvider);
-      const hasRevoked = await revokeHelper.hasRevoked(wallet, token, spender);
-      
-      console.log("✅ hasRevoked result:", hasRevoked);
-      
-      return res.json({
-        revokeHelperAddress: REVOKE_HELPER_ADDRESS,
-        user: wallet,
-        token: token,
-        spender: spender,
-        hasRevoked: hasRevoked,
-        status: hasRevoked ? "User has revoked" : "User has NOT revoked"
-      });
-      
-    } catch (error) {
-      console.log("❌ Error calling hasRevoked:", error.message);
-      
-      // Try to get contract code to see what functions are available
-      const code = await baseProvider.getCode(REVOKE_HELPER_ADDRESS);
-      if (code === "0x") {
-        return res.json({
-          error: "No contract found at RevokeHelper address",
-          revokeHelperAddress: REVOKE_HELPER_ADDRESS
-        });
-      } else {
-        return res.json({
-          error: "Contract exists but hasRevoked function failed",
-          revokeHelperAddress: REVOKE_HELPER_ADDRESS,
-          contractCodeLength: code.length,
-          functionError: error.message
-        });
-      }
-    }
-    
-  } catch (error) {
-    console.error("Check RevokeHelper error:", error);
-    return res.status(500).json({ error: "Failed to check RevokeHelper", details: error.message });
-  }
 });
 
 // Debug endpoint to check what's happening
@@ -391,8 +350,8 @@ app.get("/debug/:wallet", async (req, res) => {
       isFarcasterUser: true,
       fid: fid,
       username: user.username,
-      canClaim: true,
-      verifiedBy: "Neynar API"
+      canClaim: "Must revoke first",
+      verifiedBy: "Neynar API + Database check required"
     });
   } catch (err) {
     console.error("Debug error:", err);
@@ -403,6 +362,7 @@ app.get("/debug/:wallet", async (req, res) => {
 /* ---------- start server ---------- */
 app.listen(PORT, () => {
   console.log(`✅ FarGuard Attester running on :${PORT}`);
-  console.log(`📋 Anti-farming verification: FID age + social activity checks`);
-  console.log(`🚀 No blockchain scanning needed - simple and fast!`);
+  console.log(`📊 Supabase connected: ${!!supabase}`);
+  console.log(`🔍 Revocation verification: Database + RevokeHelper required`);
+  console.log(`🚀 Only users who actually revoked can claim rewards!`);
 });
