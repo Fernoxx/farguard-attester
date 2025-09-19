@@ -55,7 +55,7 @@ const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
   Attestation: [
-    { name: "user", type: "address" },  // CHANGED: "wallet" -> "user" to match contract
+    { name: "wallet", type: "address" },  // CHANGE: "user" -> "wallet"
     { name: "fid", type: "uint256" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
@@ -254,8 +254,8 @@ app.post("/attest", async (req, res) => {
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
     
-    // CHANGED: Use "user" instead of "wallet" to match contract
-    const value = { user: walletAddr, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
+    // FIXED: Use "wallet" instead of "user" to match contract
+    const value = { wallet: walletAddr, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
 
     // ADDED: Debug logging
     console.log("🔍 EIP-712 Domain:", domain);
