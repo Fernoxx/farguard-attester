@@ -248,13 +248,13 @@ app.post("/attest", async (req, res) => {
     
     console.log("✅ User has revoked using RevokeHelper - proceeding with attestation");
 
-    // Step 3: Generate attestation with DEBUG LOGGING
+    // Step 3: Generate attestation with CORRECT EIP-712 format
     const nonce = BigInt(Date.now()).toString();
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
     
-    // FIXED: Use "wallet" instead of "user" to match contract
-    const value = { wallet: walletAddr, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
+    // FIXED: Remove "wallet" field - contract doesn't expect it
+    const value = { fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
 
     // ADDED: Debug logging
     console.log("🔍 EIP-712 Domain:", domain);
