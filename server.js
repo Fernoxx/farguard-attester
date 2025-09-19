@@ -55,7 +55,7 @@ const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
   Attestation: [
-    { name: "wallet", type: "address" },
+    { name: "user", type: "address" },  // CHANGED: "wallet" -> "user" to match contract
     { name: "fid", type: "uint256" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
@@ -249,12 +249,19 @@ app.post("/attest", async (req, res) => {
     
     console.log("✅ User has revoked using RevokeHelper - proceeding with attestation");
 
-    // Step 3: Generate attestation
+    // Step 3: Generate attestation with DEBUG LOGGING
     const nonce = BigInt(Date.now()).toString();
     const deadline = Math.floor(Date.now() / 1000) + 10 * 60;
     const domain = buildDomain();
-    const attestationWallet = walletAddr;
-    const value = { wallet: attestationWallet, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
+    
+    // CHANGED: Use "user" instead of "wallet" to match contract
+    const value = { user: walletAddr, fid, nonce, deadline, token: tokenAddr, spender: spenderAddr };
+
+    // ADDED: Debug logging
+    console.log("🔍 EIP-712 Domain:", domain);
+    console.log("🔍 EIP-712 Types:", ATTEST_TYPES);
+    console.log("🔍 Message to sign:", value);
+    console.log("🔍 Attester wallet address:", attesterWallet.address);
 
     console.log("🔍 Signing attestation with values:", value);
     const sig = await attesterWallet.signTypedData(domain, ATTEST_TYPES, value);
