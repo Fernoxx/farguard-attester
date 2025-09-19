@@ -55,8 +55,7 @@ const NAME = "RevokeAndClaim";
 const VERSION = "1";
 const ATTEST_TYPES = {
   Attestation: [
-    { name: "wallet", type: "address" },  // CHANGE: "user" -> "wallet"
-    { name: "fid", type: "uint256" },
+    { name: "fid", type: "uint256" },      // FID first (matches contract)
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
     { name: "token", type: "address" },
